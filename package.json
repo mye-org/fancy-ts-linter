@@ -1,0 +1,29 @@
+{
+  "name": "fancy-ts-linter",
+  "version": "0.1.0",
+  "description": "Type-aware functional TypeScript analyzer and AI-agent DDD/FP hint engine",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "fancy-ts-linter": "./bin/fancy-ts-linter.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint:self": "tsx src/cli.ts src/**/*.ts --format md"
+  },
+  "dependencies": {
+    "fp-ts": "^2.16.9",
+    "monocle-ts": "^2.3.13",
+    "newtype-ts": "^0.3.5",
+    "ts-pattern": "^5.6.2",
+    "typescript": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "vitest": "^3.0.8"
+  }
+}
