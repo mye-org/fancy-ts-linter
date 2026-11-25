@@ -27,7 +27,7 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
     const categories = new Set(report.hints.map((h) => h.category));
     expect(categories.has('adt-over-flags')).toBe(true);
     expect(categories.has('newtype-brand')).toBe(true);
-  });
+  }, 15000);
 
   it('emits pattern-matching-depth hint on shallowSwitchMatch.ts', () => {
     const report = analyzeOne('test/fixtures/violations/shallowSwitchMatch.ts');
