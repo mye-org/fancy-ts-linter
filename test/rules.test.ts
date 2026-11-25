@@ -44,7 +44,7 @@ describe('Tier 1 Hard-Error Rules', () => {
     const report = analyzeOne('test/fixtures/violations/imperativeOrder.ts');
     expect(report.passed).toBe(false);
     const ruleIds = new Set(report.errors.map((e) => e.ruleId));
-    expect(ruleIds.has('single-exported-flow')).toBe(true);
+    expect(ruleIds.has('single-exported-function')).toBe(true);
     expect(ruleIds.has('no-disallowed-top-level')).toBe(true);
     expect(ruleIds.has('no-imperative-constructs')).toBe(true);
     expect(ruleIds.has('no-mutating-methods')).toBe(true);

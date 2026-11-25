@@ -48,23 +48,21 @@ const checkSingleExportCount = (ctx: RuleContext): ReadonlyArray<DiagnosticError
       runtimeExports.length === 0
         ? [
             makeStructureError(ctx)({
-              ruleId: 'single-exported-flow',
+              ruleId: 'single-exported-function',
               category: 'structure',
               node: ctx.sourceFile,
-              message:
-                'Module must export exactly one runtime function defined via `flow(...)`, found 0.',
+              message: 'Module must export exactly one runtime function, found 0.',
               fixGuidance:
-                'Add `export const main = flow(step1, step2) satisfies ExportedType;` as the sole runtime export.',
+                'Add `export const main = <fn> satisfies ExportedType;` as the sole runtime export.',
             }),
           ]
         : RA.map((stmt: ts.Statement) =>
             makeStructureError(ctx)({
-              ruleId: 'single-exported-flow',
+              ruleId: 'single-exported-function',
               category: 'structure',
               node: stmt,
               message: `Module must have exactly one runtime export, found ${runtimeExports.length}.`,
-              fixGuidance:
-                'Keep only one exported `flow(...)` function and unexport all private helpers.',
+              fixGuidance: 'Keep only one exported function and unexport all private helpers.',
             }),
           )(runtimeExports.slice(1)),
     constant([] as ReadonlyArray<DiagnosticError>),
@@ -78,18 +76,18 @@ const allowedExportKinds: ReadonlyArray<BindingInfo['kind']> = [
   'adt-matcher',
 ];
 
-const checkExportedIsFlowAndSatisfies = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+const checkExportedFunctionAndSatisfies = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const exportedBindings = RA.filter((b: BindingInfo) => b.isExported)(ctx.ir.bindings);
   return RA.chain((b: BindingInfo): ReadonlyArray<DiagnosticError> => {
-    const flowErr = !allowedExportKinds.includes(b.kind)
+    const fnErr = !allowedExportKinds.includes(b.kind)
       ? [
           makeStructureError(ctx)({
-            ruleId: 'single-exported-flow',
+            ruleId: 'single-exported-function',
             category: 'structure',
             node: b.declaration,
-            message: `Exported binding \`${b.name}\` must be a \`flow(...)\` composition or a unary function.`,
+            message: `Exported binding \`${b.name}\` must be a unary function (or \`flow(...)\` composition).`,
             fixGuidance:
-              'Define the exported function using `export const name = flow(a, b) satisfies FnType;` or `export const name = singleFn satisfies FnType;`.',
+              'Define the exported function using `export const name = fn satisfies FnType;` (e.g., an arrow function, `flow(...)`, or helper reference).',
           }),
         ]
       : ([] as ReadonlyArray<DiagnosticError>);
@@ -104,7 +102,7 @@ const checkExportedIsFlowAndSatisfies = (ctx: RuleContext): ReadonlyArray<Diagno
           }),
         ]
       : ([] as ReadonlyArray<DiagnosticError>);
-    return [...flowErr, ...satisfiesErr];
+    return [...fnErr, ...satisfiesErr];
   })(exportedBindings);
 };
 
@@ -127,7 +125,7 @@ const checkDisallowedTopLevelStatements = (ctx: RuleContext): ReadonlyArray<Diag
         category: 'structure',
         node: stmt,
         message:
-          'Disallowed top-level declaration. Only imports, types, private const functions/optics/matchers, and one exported `flow` are allowed.',
+          'Disallowed top-level declaration. Only imports, types, private const functions/optics/matchers, and one exported function are allowed.',
         fixGuidance:
           'Convert to `type` / `export type` or a private `const` unary arrow function / `flow`.',
       }),
@@ -151,7 +149,7 @@ const checkDisallowedOtherBindings = (ctx: RuleContext): ReadonlyArray<Diagnosti
 
 const runStructureChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => [
   ...checkSingleExportCount(ctx),
-  ...checkExportedIsFlowAndSatisfies(ctx),
+  ...checkExportedFunctionAndSatisfies(ctx),
   ...checkDisallowedTopLevelStatements(ctx),
   ...checkDisallowedOtherBindings(ctx),
 ];

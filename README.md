@@ -1,14 +1,14 @@
 # `fancy-ts-linter`
 
-A type-aware TypeScript static analyzer and AI-agent hint engine built for automated coding loops. It enforces a strict **Canonical Single-`flow` Module** style (`fp-ts` + `monocle-ts` + `newtype-ts` + `ts-pattern`) and emits structured refactoring hints for Domain-Driven Design (DDD), Monads, Optics, and declarative programming.
+A type-aware TypeScript static analyzer and AI-agent hint engine built for automated coding loops. It enforces a strict **Single Exported Function Module** style (`fp-ts` + `monocle-ts` + `newtype-ts` + `ts-pattern`) and emits structured refactoring hints for Domain-Driven Design (DDD), Monads, Optics, and declarative programming.
 
 ---
 
 ## Core Design Principles
 
-- **One Exported Function per Module:** Every file exposes `export const <domainName> = flow(...) satisfies <FnType>` as its sole runtime export (`export type` is allowed).
+- **One Exported Function per Module:** Every file exposes a single unary function (`export const <domainName> = <fn> satisfies <FnType>`, e.g. a `flow(...)` composition, arrow function, or helper reference) as its sole runtime export (`export type` is allowed).
 - **Point-Free & Unary:** All functions have arity `1` (curried unary factories allowed), expression bodies only, zero inline lambdas, zero `pipe(...)`, and no nested `flow(...)`.
-- **Mandatory `satisfies` on Export, Inference Inside:** The exported `flow` must pin its contract with `satisfies`; private helpers prefer type inference.
+- **Mandatory `satisfies` on Export, Inference Inside:** The exported function must pin its contract with `satisfies`; private helpers prefer type inference.
 - **Illegal States Unrepresentable:** Prefer `newtype-ts` branded types over raw primitives and Discriminated Union ADTs + `ts-pattern` structural matching over boolean flags.
 - **Two-Tier Feedback for AI Loops:**
   - **Tier 1 Hard Errors (`exit 1`):** Must be fixed before the loop passes.
@@ -93,7 +93,7 @@ export const priceOrder = flow(
 | :--- | :--- | :--- |
 | `TS*` | `tsc` | Zero TypeScript compiler syntactic/semantic diagnostics |
 | `no-type-holes` | `type-safety` | Forbids `any`, `as` casts (except `as const`), `<T>x`, and `!` non-null assertions (`satisfies` allowed) |
-| `single-exported-flow` | `structure` | Exactly 1 runtime export (`export const <name> = flow(...)` or a single unary function) |
+| `single-exported-function` | `structure` | Exactly 1 runtime export (a single unary function or `flow(...)` composition) |
 | `export-requires-satisfies` | `export-satisfies` | Exported function must use `satisfies <Type>` |
 | `no-disallowed-top-level` | `structure` | Only imports, types, private functions, Optics, ADT matchers, and `fp-ts` typeclass instances |
 | `no-pipe` | `point-free` | Forbids `pipe(...)` everywhere |
