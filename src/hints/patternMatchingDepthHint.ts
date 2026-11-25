@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -74,12 +73,5 @@ const checkMatcherDepth = (ctx: RuleContext) => (b: BindingInfo): ReadonlyArray<
   )(b.initializer);
 };
 
-const runPatternDepthHints = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain(checkMatcherDepth(ctx))(ctx.ir.bindings);
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectPatternMatchingDepthHints = flow(
-  identityCtx,
-  runPatternDepthHints,
-) satisfies HintRunner;
+export const detectPatternMatchingDepthHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> =>
+  RA.chain(checkMatcherDepth(ctx))(ctx.ir.bindings)) satisfies HintRunner;

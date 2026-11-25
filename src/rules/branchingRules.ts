@@ -122,18 +122,11 @@ const checkTsPatternExhaustive =
       ),
     )(nodes);
 
-const runBranchingChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+export const checkBranchingRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...checkNoTernary(ctx)(nodes),
     ...checkNoNullishOperators(ctx)(nodes),
     ...checkTsPatternExhaustive(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkBranchingRules = flow(
-  identityCtx,
-  runBranchingChecks,
-) satisfies RuleRunner;
+}) satisfies RuleRunner;

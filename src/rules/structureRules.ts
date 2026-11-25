@@ -147,16 +147,9 @@ const checkDisallowedOtherBindings = (ctx: RuleContext): ReadonlyArray<Diagnosti
     ),
   )(ctx.ir.bindings);
 
-const runStructureChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => [
+export const checkStructureRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => [
   ...checkSingleExportCount(ctx),
   ...checkExportedFunctionAndSatisfies(ctx),
   ...checkDisallowedTopLevelStatements(ctx),
   ...checkDisallowedOtherBindings(ctx),
-];
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkStructureRules = flow(
-  identityCtx,
-  runStructureChecks,
-) satisfies RuleRunner;
+]) satisfies RuleRunner;

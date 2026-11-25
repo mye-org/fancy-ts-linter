@@ -222,7 +222,7 @@ const checkNestedSpreads =
       ),
     )(nodes);
 
-const runSafetyAndMonadChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+export const checkTypeSafetyAndMonadRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...ctx.tscErrors,
@@ -232,11 +232,4 @@ const runSafetyAndMonadChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticErro
     ...checkRawPromiseBindings(ctx),
     ...checkNestedSpreads(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkTypeSafetyAndMonadRules = flow(
-  identityCtx,
-  runSafetyAndMonadChecks,
-) satisfies RuleRunner;
+}) satisfies RuleRunner;

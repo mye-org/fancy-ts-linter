@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -86,14 +85,7 @@ const checkArrayOfEffects = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
       : [];
   })(ctx.ir.bindings);
 
-const runMonadLifting = (ctx: RuleContext): ReadonlyArray<AgentHint> => [
+export const detectMonadLiftingHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...checkReaderThreading(ctx),
   ...checkArrayOfEffects(ctx),
-];
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectMonadLiftingHints = flow(
-  identityCtx,
-  runMonadLifting,
-) satisfies HintRunner;
+]) satisfies HintRunner;

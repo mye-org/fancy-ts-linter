@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import type { AgentHint, FieldInfo, RuleContext, TypeDeclInfo } from '../model/report.js';
@@ -55,12 +54,5 @@ const checkTypeForRawPrimitives = (td: TypeDeclInfo): ReadonlyArray<AgentHint> =
   ];
 };
 
-const runNewtypeBrandHints = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain(checkTypeForRawPrimitives)(ctx.ir.typeDeclarations);
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectNewtypeBrandHints = flow(
-  identityCtx,
-  runNewtypeBrandHints,
-) satisfies HintRunner;
+export const detectNewtypeBrandHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> =>
+  RA.chain(checkTypeForRawPrimitives)(ctx.ir.typeDeclarations)) satisfies HintRunner;

@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
@@ -111,14 +110,7 @@ const checkBooleanParamBindings = (ctx: RuleContext): ReadonlyArray<AgentHint> =
 
 import * as ts from 'typescript';
 
-const runAdtOverFlags = (ctx: RuleContext): ReadonlyArray<AgentHint> => [
+export const detectAdtOverFlagsHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...RA.chain(checkMultiBooleanType)(ctx.ir.typeDeclarations),
   ...checkBooleanParamBindings(ctx),
-];
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectAdtOverFlagsHints = flow(
-  identityCtx,
-  runAdtOverFlags,
-) satisfies HintRunner;
+]) satisfies HintRunner;

@@ -80,18 +80,11 @@ const checkNoTrivialFlow =
       ),
     )(nodes);
 
-const runCompositionChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+export const checkCompositionRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...checkNoPipe(ctx)(nodes),
     ...checkNoNestedFlow(ctx)(nodes),
     ...checkNoTrivialFlow(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkCompositionRules = flow(
-  identityCtx,
-  runCompositionChecks,
-) satisfies RuleRunner;
+}) satisfies RuleRunner;

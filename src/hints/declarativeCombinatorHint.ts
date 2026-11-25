@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -60,12 +59,5 @@ const checkBindingDeclarative = (ctx: RuleContext) => (b: BindingInfo): Readonly
     },
   )(b.initializer);
 
-const runDeclarativeHints = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain(checkBindingDeclarative(ctx))(ctx.ir.bindings);
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectDeclarativeCombinatorHints = flow(
-  identityCtx,
-  runDeclarativeHints,
-) satisfies HintRunner;
+export const detectDeclarativeCombinatorHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> =>
+  RA.chain(checkBindingDeclarative(ctx))(ctx.ir.bindings)) satisfies HintRunner;

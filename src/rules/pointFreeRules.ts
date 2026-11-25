@@ -351,7 +351,7 @@ const checkEtaReducible =
       ),
     )(nodes);
 
-const runPointFreeChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+export const checkPointFreeRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...checkInlineLambdas(ctx)(nodes),
@@ -360,11 +360,4 @@ const runPointFreeChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> =>
     ...checkCallArity(ctx)(nodes),
     ...checkEtaReducible(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkPointFreeRules = flow(
-  identityCtx,
-  runPointFreeChecks,
-) satisfies RuleRunner;
+}) satisfies RuleRunner;

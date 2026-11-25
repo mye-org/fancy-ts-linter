@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -149,16 +148,9 @@ const checkDeepCurryChain = (ctx: RuleContext): ReadonlyArray<AgentHint> => {
   })(nodes);
 };
 
-const runDddAndArityHints = (ctx: RuleContext): ReadonlyArray<AgentHint> => [
+export const detectDddAndArityHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...checkLongFlows(ctx),
   ...checkMixedPureAndIo(ctx),
   ...checkMultiParamArityStrategy(ctx),
   ...checkDeepCurryChain(ctx),
-];
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectDddAndArityHints = flow(
-  identityCtx,
-  runDddAndArityHints,
-) satisfies HintRunner;
+]) satisfies HintRunner;

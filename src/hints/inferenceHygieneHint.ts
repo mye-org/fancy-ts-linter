@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -101,12 +100,5 @@ const checkPrivateInference = (ctx: RuleContext) => (b: BindingInfo): ReadonlyAr
   )(b.initializer);
 };
 
-const runInferenceHygiene = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain(checkPrivateInference(ctx))(ctx.ir.bindings);
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectInferenceHygieneHints = flow(
-  identityCtx,
-  runInferenceHygiene,
-) satisfies HintRunner;
+export const detectInferenceHygieneHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> =>
+  RA.chain(checkPrivateInference(ctx))(ctx.ir.bindings)) satisfies HintRunner;

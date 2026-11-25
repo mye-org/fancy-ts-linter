@@ -1,4 +1,3 @@
-import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -162,7 +161,7 @@ const checkDeepOptionalTraversals =
       : [];
   };
 
-const runOpticsHints = (ctx: RuleContext): ReadonlyArray<AgentHint> => {
+export const detectOpticsHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...checkSharedNestedAccessors(ctx),
@@ -170,11 +169,4 @@ const runOpticsHints = (ctx: RuleContext): ReadonlyArray<AgentHint> => {
     ...checkNestedArrayUpdates(ctx)(nodes),
     ...checkDeepOptionalTraversals(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const detectOpticsHints = flow(
-  identityCtx,
-  runOpticsHints,
-) satisfies HintRunner;
+}) satisfies HintRunner;

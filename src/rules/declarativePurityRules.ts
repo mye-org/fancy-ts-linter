@@ -161,18 +161,11 @@ const checkNoMutatingMethods =
       ),
     )(nodes);
 
-const runPurityChecks = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
+export const checkDeclarativePurityRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
   return [
     ...checkNoBlockBody(ctx)(nodes),
     ...checkNoImperativeConstructs(ctx)(nodes),
     ...checkNoMutatingMethods(ctx)(nodes),
   ];
-};
-
-const identityCtx = (ctx: RuleContext) => ctx;
-
-export const checkDeclarativePurityRules = flow(
-  identityCtx,
-  runPurityChecks,
-) satisfies RuleRunner;
+}) satisfies RuleRunner;
