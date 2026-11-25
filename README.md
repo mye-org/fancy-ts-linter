@@ -93,17 +93,17 @@ export const priceOrder = flow(
 | :--- | :--- | :--- |
 | `TS*` | `tsc` | Zero TypeScript compiler syntactic/semantic diagnostics |
 | `no-type-holes` | `type-safety` | Forbids `any`, `as` casts (except `as const`), `<T>x`, and `!` non-null assertions (`satisfies` allowed) |
-| `single-exported-flow` | `structure` | Exactly 1 runtime export, which must be `export const <name> = flow(...)` |
-| `export-requires-satisfies` | `export-satisfies` | Exported `flow` must use `satisfies <Type>` |
+| `single-exported-flow` | `structure` | Exactly 1 runtime export (`export const <name> = flow(...)` or a single unary function) |
+| `export-requires-satisfies` | `export-satisfies` | Exported function must use `satisfies <Type>` |
 | `no-disallowed-top-level` | `structure` | Only imports, types, private functions, Optics, ADT matchers, and `fp-ts` typeclass instances |
 | `no-pipe` | `point-free` | Forbids `pipe(...)` everywhere |
 | `no-nested-flow` | `point-free` | Forbids `flow(...)` nested inside another `flow(...)` |
 | `no-trivial-flow` | `point-free` | Forbids 0-step or 1-step `flow(f)` |
-| `unary-arity-only` | `point-free` | All functions must have arity 1 (use a named Input/Domain Record, or at most 2–3 curried levels when partially applied) |
+| `unary-arity-only` | `point-free` | All functions must have arity 1 (except 0-arg lazy thunks in branching combinators; use a named Input/Domain Record, or at most 2–3 curried levels when partially applied) |
 | `max-curry-depth` | `point-free` | Forbids curried chains deeper than 3 levels (`a => b => c => d => ...`); collapse into an input record or 2-level `(ctx) => (input)` |
-| `no-inline-lambda` | `point-free` | Forbids anonymous lambdas inside `flow(...)` or combinator arguments |
-| `no-eta-reducible` | `point-free` | Forbids `x => f(x)` wrappers |
-| `no-block-body` | `declarative-purity` | Forbids `{ ... }` block bodies on functions |
+| `no-inline-lambda` | `point-free` | Forbids complex anonymous lambdas (permits trivial projections, trivial predicates, and lazy thunks in branching combinators) |
+| `no-eta-reducible` | `point-free` | Forbids `x => f(x)` wrappers (exempts method-binding wrappers `x => obj.method(x)`) |
+| `no-block-body` | `declarative-purity` | Forbids imperative `{ ... }` block bodies (permits pure `const`-binding blocks ending in a single `return <expr>;`) |
 | `no-imperative-constructs` | `declarative-purity` | Forbids `let`/`var`, `if`, `switch`, `for`, `while`, `try`/`catch`, `throw`, `async`/`await`, `=`, `++`/`--` |
 | `no-mutating-methods` | `declarative-purity` | Forbids `.push`, `.pop`, `.splice`, `.sort`, `.reverse`, `.forEach`, `Object.assign` |
 | `no-ternary` | `branching` | Forbids `? :` ternary expressions |
@@ -125,9 +125,9 @@ export const priceOrder = flow(
 | `ddd-decomposition` | `flow` exceeding `--max-flow-steps`, or mixed pure + I/O steps | Suggests named sub-flows and pure `Either` core / `TaskEither` shell split |
 | `arity-strategy` | Multi-parameter functions or curried chains of 3+ levels | Advises **Input/Domain Record** (`(input: FnInput) => ...`) by default, or **at most 2–3 curried levels** only when outer args are partially applied |
 | `monad` | Threaded config/deps across helpers or `Array<Effect<T>>` | Suggests `Reader`/`ReaderTaskEither` or `RA.traverse` |
-| `optic` | Repeated nested property chains or spread + array `.map` | Suggests `Lens.fromPath` or `Traversal` |
+| `optic` | Shared nested accessors across pipelines, nested immutable updates, or deep optional traversals | Suggests `Lens.fromPath`, `Optional`/`Prism`, or `Traversal` |
 | `declarative-combinator` | Self-recursion or manual `reduce` | Suggests `RA.filterMap`, `RA.partitionMap`, `Monoid.concatAll` |
-| `inference-hygiene` | Unexported bindings with redundant return types/`satisfies` | Suggests omitting redundant annotations when TS infers the same type |
+| `inference-hygiene` | Simple unexported bindings with redundant return types/`satisfies` | Suggests omitting redundant annotations (exempts curried, generic, and HKT/complex-union helpers) |
 
 ---
 

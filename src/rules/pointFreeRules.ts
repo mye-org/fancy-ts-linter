@@ -40,6 +40,124 @@ const isTopLevelCurriedArrow = (node: ts.Node): boolean => {
   );
 };
 
+const isPropertyChainOn =
+  (paramName: string) =>
+  (expr: ts.Expression): boolean =>
+    ts.isPropertyAccessExpression(expr) &&
+    ((ts.isIdentifier(expr.expression) && expr.expression.text === paramName) ||
+      isPropertyChainOn(paramName)(expr.expression));
+
+const isTrivialProjection = (arrow: ts.ArrowFunction): boolean => {
+  if (arrow.parameters.length !== 1 || ts.isBlock(arrow.body)) {
+    return false;
+  }
+  const param = arrow.parameters[0];
+  if (param === undefined || !ts.isIdentifier(param.name)) {
+    return false;
+  }
+  return isPropertyChainOn(param.name.text)(unwrapParens(arrow.body));
+};
+
+const comparisonAndLogicOps: ReadonlyArray<ts.SyntaxKind> = [
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+  ts.SyntaxKind.AmpersandAmpersandToken,
+  ts.SyntaxKind.BarBarToken,
+];
+
+const isSimpleValueExpr =
+  (paramName: string) =>
+  (expr: ts.Expression): boolean => {
+    const e = unwrapParens(expr);
+    if (ts.isIdentifier(e)) {
+      return true;
+    }
+    if (
+      ts.isStringLiteral(e) ||
+      ts.isNumericLiteral(e) ||
+      e.kind === ts.SyntaxKind.TrueKeyword ||
+      e.kind === ts.SyntaxKind.FalseKeyword
+    ) {
+      return true;
+    }
+    if (ts.isPropertyAccessExpression(e)) {
+      return isPropertyChainOn(paramName)(e) || ts.isIdentifier(e.expression);
+    }
+    if (
+      ts.isPrefixUnaryExpression(e) &&
+      (e.operator === ts.SyntaxKind.ExclamationToken || e.operator === ts.SyntaxKind.MinusToken)
+    ) {
+      return isSimpleValueExpr(paramName)(e.operand);
+    }
+    if (ts.isBinaryExpression(e) && comparisonAndLogicOps.includes(e.operatorToken.kind)) {
+      return isSimpleValueExpr(paramName)(e.left) && isSimpleValueExpr(paramName)(e.right);
+    }
+    return false;
+  };
+
+const isTrivialPredicate = (arrow: ts.ArrowFunction): boolean => {
+  if (arrow.parameters.length !== 1 || ts.isBlock(arrow.body)) {
+    return false;
+  }
+  const param = arrow.parameters[0];
+  if (param === undefined || !ts.isIdentifier(param.name)) {
+    return false;
+  }
+  const body = unwrapParens(arrow.body);
+  return (
+    (ts.isBinaryExpression(body) &&
+      comparisonAndLogicOps.includes(body.operatorToken.kind) &&
+      isSimpleValueExpr(param.name.text)(body.left) &&
+      isSimpleValueExpr(param.name.text)(body.right)) ||
+    (ts.isPrefixUnaryExpression(body) &&
+      body.operator === ts.SyntaxKind.ExclamationToken &&
+      isSimpleValueExpr(param.name.text)(body.operand))
+  );
+};
+
+const lazyBranchMethods: ReadonlyArray<string> = [
+  'otherwise',
+  'with',
+  'match',
+  'matchW',
+  'getOrElse',
+  'getOrElseW',
+  'orElse',
+  'orElseW',
+  'fold',
+  'foldW',
+  'delay',
+  'fromIO',
+];
+
+const isLazyBranchThunk = (arrow: ts.ArrowFunction): boolean => {
+  if (arrow.parameters.length !== 0 || ts.isBlock(arrow.body)) {
+    return false;
+  }
+  const parent = arrow.parent;
+  if (parent === undefined || !ts.isCallExpression(parent)) {
+    return false;
+  }
+  const callee = parent.expression;
+  if (ts.isPropertyAccessExpression(callee)) {
+    return lazyBranchMethods.includes(callee.name.text);
+  }
+  if (ts.isIdentifier(callee)) {
+    return lazyBranchMethods.includes(callee.text);
+  }
+  return false;
+};
+
+const isAllowedInlineArrow = (n: ts.ArrowFunction | ts.FunctionExpression): boolean =>
+  ts.isArrowFunction(n) &&
+  (isTrivialProjection(n) || isTrivialPredicate(n) || isLazyBranchThunk(n));
+
 const checkInlineLambdas =
   (ctx: RuleContext) =>
   (nodes: ReadonlyArray<ts.Node>): ReadonlyArray<DiagnosticError> =>
@@ -47,7 +165,8 @@ const checkInlineLambdas =
       RA.filter(
         (n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression =>
           (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
-          !isTopLevelCurriedArrow(n),
+          !isTopLevelCurriedArrow(n) &&
+          !isAllowedInlineArrow(n),
       ),
       RA.map((n: ts.ArrowFunction | ts.FunctionExpression) =>
         makePfError(ctx)({
@@ -68,7 +187,8 @@ const checkArrowArity =
       RA.filter(
         (n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression =>
           (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
-          n.parameters.length !== 1,
+          n.parameters.length !== 1 &&
+          !(ts.isArrowFunction(n) && isLazyBranchThunk(n)),
       ),
       RA.map((n: ts.ArrowFunction | ts.FunctionExpression) =>
         makePfError(ctx)({
@@ -77,7 +197,7 @@ const checkArrowArity =
           message: `Function must have arity 1 (single parameter), found ${n.parameters.length} parameter(s).`,
           fixGuidance:
             n.parameters.length === 0
-              ? 'Replace 0-arg thunk with `constant(...)` or accept a single domain input parameter.'
+              ? 'Replace 0-arg thunk with `constant(...)` (or use `() => expr` inside lazy branching combinators) or accept a single domain input parameter.'
               : 'Bundle parameters into a single named Domain/Input Record (`(input: FnInput) => ...`), or use at most a 2–3 level curry (`(config) => (input) => ...`) only when outer args are partially applied.',
         }),
       ),
@@ -173,7 +293,22 @@ const referencesIdentifier = ({
 }): boolean =>
   RA.some((n: ts.Node) => ts.isIdentifier(n) && n.text === name)(collectAllNodes(sf)(node));
 
-const isEtaReducibleArrow = (sf: ts.SourceFile) => (arrow: ts.ArrowFunction): boolean => {
+const isNamespaceReceiver = (checker: ts.TypeChecker) => (expr: ts.Expression): boolean => {
+  const sym = checker.getSymbolAtLocation(expr);
+  if (sym === undefined) {
+    return false;
+  }
+  const resolved =
+    (sym.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(sym) : sym;
+  return (
+    (resolved.flags & (ts.SymbolFlags.ValueModule | ts.SymbolFlags.NamespaceModule)) !== 0
+  );
+};
+
+const isMethodBindingWrapper = (checker: ts.TypeChecker) => (callee: ts.Expression): boolean =>
+  ts.isPropertyAccessExpression(callee) && !isNamespaceReceiver(checker)(callee.expression);
+
+const isEtaReducibleArrow = (ctx: RuleContext) => (arrow: ts.ArrowFunction): boolean => {
   if (arrow.parameters.length !== 1) {
     return false;
   }
@@ -186,12 +321,15 @@ const isEtaReducibleArrow = (sf: ts.SourceFile) => (arrow: ts.ArrowFunction): bo
   if (!ts.isCallExpression(body) || body.arguments.length !== 1) {
     return false;
   }
+  if (isMethodBindingWrapper(ctx.checker)(body.expression)) {
+    return false;
+  }
   const arg = body.arguments[0];
   return (
     arg !== undefined &&
     ts.isIdentifier(arg) &&
     arg.text === paramName &&
-    !referencesIdentifier({ sf, name: paramName, node: body.expression })
+    !referencesIdentifier({ sf: ctx.sourceFile, name: paramName, node: body.expression })
   );
 };
 
@@ -201,7 +339,7 @@ const checkEtaReducible =
     flow(
       RA.filter(
         (n: ts.Node): n is ts.ArrowFunction =>
-          ts.isArrowFunction(n) && isEtaReducibleArrow(ctx.sourceFile)(n),
+          ts.isArrowFunction(n) && isEtaReducibleArrow(ctx)(n),
       ),
       RA.map((n: ts.ArrowFunction) =>
         makePfError(ctx)({

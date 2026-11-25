@@ -77,4 +77,19 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
     expect(arityHints.some((h) => h.evidence.includes('4 nested parameter levels'))).toBe(true);
     expect(arityHints.some((h) => h.evidence.includes('3 nested parameter levels'))).toBe(true);
   });
+
+  it('scopes optic hints to shared accessors and exempts curried/generic/HKT helpers from inference-hygiene', () => {
+    const report = analyzeOne('test/fixtures/feedback/opticsAndInference.ts');
+    const infHints = report.hints.filter((h) => h.category === 'inference-hygiene');
+    expect(infHints.length).toBe(1);
+    expect(infHints[0]?.hintId).toBe('inference-hygiene-simpleRedundant');
+
+    const opticHints = report.hints.filter((h) => h.category === 'optic');
+    expect(opticHints.length).toBe(1);
+    expect(opticHints[0]?.hintId).toBe('optic-shared-accessor');
+    expect(opticHints[0]?.evidence).toContain('user.contact');
+
+    const oneOffReport = analyzeOne('test/fixtures/feedback/pureConstBlockAndDirectExport.ts');
+    expect(oneOffReport.hints.filter((h) => h.category === 'optic')).toEqual([]);
+  });
 });

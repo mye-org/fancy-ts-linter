@@ -66,4 +66,24 @@ describe('Tier 1 Hard-Error Rules', () => {
     expect(curryErrors.length).toBe(1);
     expect(curryErrors[0]?.message).toContain('depth 4');
   });
+
+  it('passes pure const-binding blocks, direct function export, trivial lambdas, lazy thunks, and method wrappers', () => {
+    const report = analyzeOne('test/fixtures/feedback/pureConstBlockAndDirectExport.ts');
+    expect(report.errors).toEqual([]);
+    expect(report.passed).toBe(true);
+    expect(report.summary.exportedFunction).toEqual(O.some('summarizeOrder'));
+  });
+
+  it('flags imperative blocks, complex inline lambdas, plain/namespace eta wrappers, and trivial flow', () => {
+    const report = analyzeOne('test/fixtures/feedback/imperativeBlockViolations.ts');
+    expect(report.passed).toBe(false);
+    const ruleIds = new Set(report.errors.map((e) => e.ruleId));
+    expect(ruleIds.has('no-block-body')).toBe(true);
+    expect(ruleIds.has('no-imperative-constructs')).toBe(true);
+    expect(ruleIds.has('no-inline-lambda')).toBe(true);
+    expect(ruleIds.has('no-eta-reducible')).toBe(true);
+    expect(ruleIds.has('no-trivial-flow')).toBe(true);
+    const etaErrors = report.errors.filter((e) => e.ruleId === 'no-eta-reducible');
+    expect(etaErrors.length).toBe(2);
+  });
 });

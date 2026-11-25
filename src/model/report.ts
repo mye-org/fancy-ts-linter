@@ -197,7 +197,7 @@ export type ReportInput = {
 export type BuildAnalysisReport = (input: ReportInput) => AnalysisReport;
 
 const isExportedFlowBinding = (binding: BindingInfo) =>
-  binding.isExported && binding.kind === 'exported-flow';
+  binding.isExported && binding.kind !== 'other';
 
 const findExportedBinding = (ir: ModuleIR): O.Option<BindingInfo> =>
   RA.findFirst(isExportedFlowBinding)(ir.bindings);

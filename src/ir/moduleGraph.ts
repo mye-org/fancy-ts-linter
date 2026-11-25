@@ -188,6 +188,10 @@ const classifyBindingKind = ({
           constant<NodeKind>('adt-matcher'),
         )
         .when(ts.isArrowFunction, constant<NodeKind>('leaf-fn'))
+        .when(
+          (e) => isExported && ts.isIdentifier(e) && inspector.isUnaryFunctionType(type),
+          constant<NodeKind>('leaf-fn'),
+        )
         .when(ts.isCallExpression, (e) =>
           (inspector.isUnaryFunctionType(type) ||
             (type.getCallSignatures().length > 0 &&

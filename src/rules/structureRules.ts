@@ -71,22 +71,28 @@ const checkSingleExportCount = (ctx: RuleContext): ReadonlyArray<DiagnosticError
   )(runtimeExports.length === 1);
 };
 
+const allowedExportKinds: ReadonlyArray<BindingInfo['kind']> = [
+  'exported-flow',
+  'leaf-fn',
+  'partial-app',
+  'adt-matcher',
+];
+
 const checkExportedIsFlowAndSatisfies = (ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
   const exportedBindings = RA.filter((b: BindingInfo) => b.isExported)(ctx.ir.bindings);
   return RA.chain((b: BindingInfo): ReadonlyArray<DiagnosticError> => {
-    const flowErr =
-      b.kind !== 'exported-flow'
-        ? [
-            makeStructureError(ctx)({
-              ruleId: 'single-exported-flow',
-              category: 'structure',
-              node: b.declaration,
-              message: `Exported binding \`${b.name}\` must be a \`flow(...)\` composition.`,
-              fixGuidance:
-                'Define the exported function using `export const name = flow(a, b) satisfies FnType;`.',
-            }),
-          ]
-        : ([] as ReadonlyArray<DiagnosticError>);
+    const flowErr = !allowedExportKinds.includes(b.kind)
+      ? [
+          makeStructureError(ctx)({
+            ruleId: 'single-exported-flow',
+            category: 'structure',
+            node: b.declaration,
+            message: `Exported binding \`${b.name}\` must be a \`flow(...)\` composition or a unary function.`,
+            fixGuidance:
+              'Define the exported function using `export const name = flow(a, b) satisfies FnType;` or `export const name = singleFn satisfies FnType;`.',
+          }),
+        ]
+      : ([] as ReadonlyArray<DiagnosticError>);
     const satisfiesErr = !b.hasSatisfies
       ? [
           makeStructureError(ctx)({
@@ -94,7 +100,7 @@ const checkExportedIsFlowAndSatisfies = (ctx: RuleContext): ReadonlyArray<Diagno
             category: 'export-satisfies',
             node: b.declaration,
             message: `Exported function \`${b.name}\` must use the \`satisfies\` keyword to pin its type contract.`,
-            fixGuidance: 'Append `satisfies ExportedFnType` after `flow(...)`.',
+            fixGuidance: 'Append `satisfies ExportedFnType` after the exported function.',
           }),
         ]
       : ([] as ReadonlyArray<DiagnosticError>);

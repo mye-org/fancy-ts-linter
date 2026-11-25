@@ -29,22 +29,47 @@ const makePurityError =
     fixGuidance,
   });
 
+const isConstVarStmt = (stmt: ts.Statement): boolean =>
+  ts.isVariableStatement(stmt) &&
+  (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
+  RA.every((d: ts.VariableDeclaration) => d.initializer !== undefined)(
+    stmt.declarationList.declarations,
+  );
+
+const isNonEmptyReturnStmt = (stmt: ts.Statement): boolean =>
+  ts.isReturnStatement(stmt) && stmt.expression !== undefined;
+
+const isPureConstBindingBlock = (block: ts.Block): boolean => {
+  if (block.statements.length === 0) {
+    return false;
+  }
+  const initStmts = block.statements.slice(0, -1);
+  const lastStmt = block.statements[block.statements.length - 1];
+  return (
+    lastStmt !== undefined &&
+    RA.every(isConstVarStmt)(initStmts) &&
+    isNonEmptyReturnStmt(lastStmt)
+  );
+};
+
 const checkNoBlockBody =
   (ctx: RuleContext) =>
   (nodes: ReadonlyArray<ts.Node>): ReadonlyArray<DiagnosticError> =>
     flow(
       RA.filter(
         (n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression =>
-          (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && ts.isBlock(n.body),
+          (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
+          ts.isBlock(n.body) &&
+          !isPureConstBindingBlock(n.body),
       ),
       RA.map((n: ts.ArrowFunction | ts.FunctionExpression) =>
         makePurityError(ctx)({
           ruleId: 'no-block-body',
           node: n,
           message:
-            'Function block body `{ ... }` is forbidden; functions must be pure expression-bodied.',
+            'Imperative function block body `{ ... }` is forbidden; only expression bodies or pure `const`-binding blocks ending in a single `return <expr>;` are allowed.',
           fixGuidance:
-            'Convert the block body to a single expression or decompose intermediate steps into a `flow(...)`.',
+            'Convert the block body to a single expression, a pure `const ...; return <expr>;` block, or decompose steps into a `flow(...)`.',
         }),
       ),
     )(nodes);
