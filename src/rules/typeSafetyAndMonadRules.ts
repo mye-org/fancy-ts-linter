@@ -11,13 +11,17 @@ const collectAllNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts
   ...RA.chain(collectAllNodes(sf))(node.getChildren(sf)),
 ];
 
+type SafetyErrorInput = {
+  readonly ruleId: string;
+  readonly category: DiagnosticError['category'];
+  readonly node: ts.Node;
+  readonly message: string;
+  readonly fixGuidance: string;
+};
+
 const makeSafetyError =
   (ctx: RuleContext) =>
-  (ruleId: string) =>
-  (category: DiagnosticError['category']) =>
-  (node: ts.Node) =>
-  (message: string) =>
-  (fixGuidance: string): DiagnosticError => ({
+  ({ ruleId, category, node, message, fixGuidance }: SafetyErrorInput): DiagnosticError => ({
     ruleId,
     category,
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
@@ -40,9 +44,14 @@ const checkTypeHoles =
     const anyNodes = flow(
       RA.filter(isAnyTypeNode),
       RA.map((n: ts.Node) =>
-        makeSafetyError(ctx)('no-type-holes')('type-safety')(n)(
-          'Explicit `any` type is forbidden.',
-        )('Replace `any` with `unknown` and narrow with `ts-pattern` or a `Prism`/decoder.'),
+        makeSafetyError(ctx)({
+          ruleId: 'no-type-holes',
+          category: 'type-safety',
+          node: n,
+          message: 'Explicit `any` type is forbidden.',
+          fixGuidance:
+            'Replace `any` with `unknown` and narrow with `ts-pattern` or a `Prism`/decoder.',
+        }),
       ),
     )(nodes);
 
@@ -51,27 +60,41 @@ const checkTypeHoles =
         (n: ts.Node): n is ts.AsExpression => ts.isAsExpression(n) && !isAsConst(n),
       ),
       RA.map((n: ts.AsExpression) =>
-        makeSafetyError(ctx)('no-type-holes')('type-safety')(n)(
-          'Unsafe type assertion `as ...` is forbidden (`satisfies` and `as const` are allowed).',
-        )('Use `satisfies` for type checking, `ts-pattern` for narrowing, or `newtype-ts` `iso`/`prism`.'),
+        makeSafetyError(ctx)({
+          ruleId: 'no-type-holes',
+          category: 'type-safety',
+          node: n,
+          message:
+            'Unsafe type assertion `as ...` is forbidden (`satisfies` and `as const` are allowed).',
+          fixGuidance:
+            'Use `satisfies` for type checking, `ts-pattern` for narrowing, or `newtype-ts` `iso`/`prism`.',
+        }),
       ),
     )(nodes);
 
     const angleAssertions = flow(
       RA.filter(ts.isTypeAssertionExpression),
       RA.map((n: ts.TypeAssertion) =>
-        makeSafetyError(ctx)('no-type-holes')('type-safety')(n)(
-          'Angle-bracket type assertion `<T>x` is forbidden.',
-        )('Use `satisfies` or proper type narrowing.'),
+        makeSafetyError(ctx)({
+          ruleId: 'no-type-holes',
+          category: 'type-safety',
+          node: n,
+          message: 'Angle-bracket type assertion `<T>x` is forbidden.',
+          fixGuidance: 'Use `satisfies` or proper type narrowing.',
+        }),
       ),
     )(nodes);
 
     const nonNulls = flow(
       RA.filter(ts.isNonNullExpression),
       RA.map((n: ts.NonNullExpression) =>
-        makeSafetyError(ctx)('no-type-holes')('type-safety')(n)(
-          'Non-null assertion `!` is forbidden.',
-        )('Lift nullable values into `fp-ts/Option` via `O.fromNullable`.'),
+        makeSafetyError(ctx)({
+          ruleId: 'no-type-holes',
+          category: 'type-safety',
+          node: n,
+          message: 'Non-null assertion `!` is forbidden.',
+          fixGuidance: 'Lift nullable values into `fp-ts/Option` via `O.fromNullable`.',
+        }),
       ),
     )(nodes);
 
@@ -103,9 +126,14 @@ const checkNullableBindings = (ctx: RuleContext): ReadonlyArray<DiagnosticError>
 
     return hasNullableParam || hasNullableRet
       ? [
-          makeSafetyError(ctx)('no-nullable-types')('monad')(b.declaration)(
-            `Binding \`${b.name}\` uses \`null\` or \`undefined\` in its signature.`,
-          )('Replace nullable types with `fp-ts/Option` (`O.Option<T>`) and lift external nullables via `O.fromNullable`.'),
+          makeSafetyError(ctx)({
+            ruleId: 'no-nullable-types',
+            category: 'monad',
+            node: b.declaration,
+            message: `Binding \`${b.name}\` uses \`null\` or \`undefined\` in its signature.`,
+            fixGuidance:
+              'Replace nullable types with `fp-ts/Option` (`O.Option<T>`) and lift external nullables via `O.fromNullable`.',
+          }),
         ]
       : [];
   })(ctx.ir.bindings);
@@ -117,9 +145,14 @@ const checkNullableTypeDecls = (ctx: RuleContext): ReadonlyArray<DiagnosticError
     )(td.fields);
     return RA.isNonEmpty(nullableFields)
       ? [
-          makeSafetyError(ctx)('no-nullable-types')('monad')(td.node)(
-            `Type \`${td.name}\` has nullable/optional field(s): ${RA.map((f: TypeDeclInfo['fields'][number]) => f.name)(nullableFields).join(', ')}.`,
-          )('Model optional fields with `O.Option<T>` or split states into a Discriminated Union ADT.'),
+          makeSafetyError(ctx)({
+            ruleId: 'no-nullable-types',
+            category: 'monad',
+            node: td.node,
+            message: `Type \`${td.name}\` has nullable/optional field(s): ${RA.map((f: TypeDeclInfo['fields'][number]) => f.name)(nullableFields).join(', ')}.`,
+            fixGuidance:
+              'Model optional fields with `O.Option<T>` or split states into a Discriminated Union ADT.',
+          }),
         ]
       : [];
   })(ctx.ir.typeDeclarations);
@@ -145,9 +178,14 @@ const checkRawPromiseBindings = (ctx: RuleContext): ReadonlyArray<DiagnosticErro
 
     return hasPromise
       ? [
-          makeSafetyError(ctx)('no-raw-promise')('monad')(b.declaration)(
-            `Binding \`${b.name}\` exposes raw \`Promise<T>\` instead of \`Task\` / \`TaskEither\`.`,
-          )('Wrap Promises at the boundary with `TE.tryCatch` / `T.of` and type signatures with `Task<T>` or `TaskEither<E, A>`.'),
+          makeSafetyError(ctx)({
+            ruleId: 'no-raw-promise',
+            category: 'monad',
+            node: b.declaration,
+            message: `Binding \`${b.name}\` exposes raw \`Promise<T>\` instead of \`Task\` / \`TaskEither\`.`,
+            fixGuidance:
+              'Wrap Promises at the boundary with `TE.tryCatch` / `T.of` and type signatures with `Task<T>` or `TaskEither<E, A>`.',
+          }),
         ]
       : [];
   })(ctx.ir.bindings);
@@ -173,9 +211,14 @@ const checkNestedSpreads =
           ts.isObjectLiteralExpression(n) && hasNestedSpreadObject(n),
       ),
       RA.map((n: ts.ObjectLiteralExpression) =>
-        makeSafetyError(ctx)('no-nested-spread')('optic')(n)(
-          'Nested object spread `{ ...a, b: { ...a.b, ... } }` is forbidden.',
-        )('Use `monocle-ts` Optics (`Lens.fromPath`, `Lens.fromProp` + `modify`) for immutable nested updates.'),
+        makeSafetyError(ctx)({
+          ruleId: 'no-nested-spread',
+          category: 'optic',
+          node: n,
+          message: 'Nested object spread `{ ...a, b: { ...a.b, ... } }` is forbidden.',
+          fixGuidance:
+            'Use `monocle-ts` Optics (`Lens.fromPath`, `Lens.fromProp` + `modify`) for immutable nested updates.',
+        }),
       ),
     )(nodes);
 

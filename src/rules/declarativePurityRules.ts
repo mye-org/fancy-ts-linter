@@ -11,12 +11,16 @@ const collectAllNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts
   ...RA.chain(collectAllNodes(sf))(node.getChildren(sf)),
 ];
 
+type PurityErrorInput = {
+  readonly ruleId: string;
+  readonly node: ts.Node;
+  readonly message: string;
+  readonly fixGuidance: string;
+};
+
 const makePurityError =
   (ctx: RuleContext) =>
-  (ruleId: string) =>
-  (node: ts.Node) =>
-  (message: string) =>
-  (fixGuidance: string): DiagnosticError => ({
+  ({ ruleId, node, message, fixGuidance }: PurityErrorInput): DiagnosticError => ({
     ruleId,
     category: 'declarative-purity',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
@@ -34,11 +38,14 @@ const checkNoBlockBody =
           (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) && ts.isBlock(n.body),
       ),
       RA.map((n: ts.ArrowFunction | ts.FunctionExpression) =>
-        makePurityError(ctx)('no-block-body')(n)(
-          'Function block body `{ ... }` is forbidden; functions must be pure expression-bodied.',
-        )(
-          'Convert the block body to a single expression or decompose intermediate steps into a `flow(...)`.',
-        ),
+        makePurityError(ctx)({
+          ruleId: 'no-block-body',
+          node: n,
+          message:
+            'Function block body `{ ... }` is forbidden; functions must be pure expression-bodied.',
+          fixGuidance:
+            'Convert the block body to a single expression or decompose intermediate steps into a `flow(...)`.',
+        }),
       ),
     )(nodes);
 
@@ -84,11 +91,13 @@ const checkNoImperativeConstructs =
     flow(
       RA.filter(isImperativeNode),
       RA.map((n: ts.Node) =>
-        makePurityError(ctx)('no-imperative-constructs')(n)(
-          `Imperative construct (${ts.SyntaxKind[n.kind]}) is forbidden in declarative functional style.`,
-        )(
-          'Replace `if`/`switch` with `ts-pattern`/`B.match`, `for` with `RA.*` combinators, `try/throw` with `Either`/`TaskEither`, and `async/await` with `Task`/`TaskEither`.',
-        ),
+        makePurityError(ctx)({
+          ruleId: 'no-imperative-constructs',
+          node: n,
+          message: `Imperative construct (${ts.SyntaxKind[n.kind]}) is forbidden in declarative functional style.`,
+          fixGuidance:
+            'Replace `if`/`switch` with `ts-pattern`/`B.match`, `for` with `RA.*` combinators, `try/throw` with `Either`/`TaskEither`, and `async/await` with `Task`/`TaskEither`.',
+        }),
       ),
     )(nodes);
 
@@ -117,11 +126,13 @@ const checkNoMutatingMethods =
     flow(
       RA.filter(isMutatingMethodCall),
       RA.map((n: ts.CallExpression) =>
-        makePurityError(ctx)('no-mutating-methods')(n)(
-          'Mutating or imperative method call is forbidden.',
-        )(
-          'Use immutable `fp-ts/ReadonlyArray` (`RA.append`, `RA.sort`, `RA.reverse`, `RA.map`) or `monocle-ts` Optics.',
-        ),
+        makePurityError(ctx)({
+          ruleId: 'no-mutating-methods',
+          node: n,
+          message: 'Mutating or imperative method call is forbidden.',
+          fixGuidance:
+            'Use immutable `fp-ts/ReadonlyArray` (`RA.append`, `RA.sort`, `RA.reverse`, `RA.map`) or `monocle-ts` Optics.',
+        }),
       ),
     )(nodes);
 

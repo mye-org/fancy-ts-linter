@@ -84,9 +84,15 @@ const isRawNumberType = (t: ts.Type): boolean =>
   (t.flags & ts.TypeFlags.NumberLike) !== 0;
 
 const propertySymbolToField =
-  (checker: ts.TypeChecker) =>
-  (inspector: TypeInspector) =>
-  (declNode: ts.Node) =>
+  ({
+    checker,
+    inspector,
+    declNode,
+  }: {
+    readonly checker: ts.TypeChecker;
+    readonly inspector: TypeInspector;
+    readonly declNode: ts.Node;
+  }) =>
   (prop: ts.Symbol): FieldInfo => {
     const propType = checker.getTypeOfSymbolAtLocation(prop, declNode);
     const nonNullType = checker.getNonNullableType(propType);
@@ -117,9 +123,7 @@ const isTypeOrInterfaceDecl = (
   ts.isTypeAliasDeclaration(stmt) || ts.isInterfaceDeclaration(stmt);
 
 const toTypeDeclInfo =
-  (sf: ts.SourceFile) =>
-  (checker: ts.TypeChecker) =>
-  (inspector: TypeInspector) =>
+  ({ sourceFile, checker, inspector }: ExtractModuleIRInput) =>
   (node: ts.TypeAliasDeclaration | ts.InterfaceDeclaration): TypeDeclInfo => {
     const type = checker.getTypeAtLocation(node);
     return {
@@ -127,63 +131,76 @@ const toTypeDeclInfo =
       isExported: hasExportModifier(node),
       isNewtype: inspector.isNewtypeBrand(type),
       isDiscriminatedUnion: isDiscriminatedUnionType(type),
-      fields: RA.map(propertySymbolToField(checker)(inspector)(node))(type.getProperties()),
-      location: inspector.getLocation(sf)(node),
+      fields: RA.map(propertySymbolToField({ checker, inspector, declNode: node }))(
+        type.getProperties(),
+      ),
+      location: inspector.getLocation(sourceFile)(node),
       node,
     };
   };
 
-const extractTypeDeclarations =
-  (sf: ts.SourceFile) =>
-  (checker: ts.TypeChecker) =>
-  (inspector: TypeInspector): ReadonlyArray<TypeDeclInfo> =>
-    flow(
-      RA.filter(isTypeOrInterfaceDecl),
-      RA.map(toTypeDeclInfo(sf)(checker)(inspector)),
-    )(sf.statements);
+const extractTypeDeclarations = (input: ExtractModuleIRInput): ReadonlyArray<TypeDeclInfo> =>
+  flow(
+    RA.filter(isTypeOrInterfaceDecl),
+    RA.map(toTypeDeclInfo(input)),
+  )(input.sourceFile.statements);
 
-const containsTsPatternMatch = (sf: ts.SourceFile) => (inspector: TypeInspector) => (expr: ts.Expression) =>
-  RA.some(inspector.isTsPatternMatch)(collectNodes(sf)(expr));
+const containsTsPatternMatch = ({
+  sf,
+  inspector,
+  expr,
+}: {
+  readonly sf: ts.SourceFile;
+  readonly inspector: TypeInspector;
+  readonly expr: ts.Expression;
+}): boolean => RA.some(inspector.isTsPatternMatch)(collectNodes(sf)(expr));
 
-const classifyBindingKind =
-  (sf: ts.SourceFile) =>
-  (inspector: TypeInspector) =>
-  (isExported: boolean) =>
-  (type: ts.Type) =>
-  (initOpt: O.Option<ts.Expression>): NodeKind =>
-    O.match(
-      constant<NodeKind>('other'),
-      (initExpr: ts.Expression): NodeKind => {
-        const unwrapped = inspector.unwrapSatisfiesAndParens(initExpr);
-        return match(unwrapped)
-          .when(
-            (e) => inspector.isFlowCall(e) && isExported,
-            constant<NodeKind>('exported-flow'),
-          )
-          .when(inspector.isFlowCall, constant<NodeKind>('sub-flow'))
-          .when(constant(inspector.isOpticType(type)), constant<NodeKind>('optic'))
-          .when(
-            constant(inspector.isTypeclassInstance(type)),
-            constant<NodeKind>('typeclass-instance'),
-          )
-          .when(
-            (e) => containsTsPatternMatch(sf)(inspector)(e),
-            constant<NodeKind>('adt-matcher'),
-          )
-          .when(ts.isArrowFunction, constant<NodeKind>('leaf-fn'))
-          .when(ts.isCallExpression, (e) =>
-            (inspector.isUnaryFunctionType(type) ||
-              (type.getCallSignatures().length > 0 &&
-                RA.every((s: ts.Signature) => s.getParameters().length <= 1)(
-                  type.getCallSignatures(),
-                ))) &&
-            !inspector.isFlowCall(e)
-              ? 'partial-app'
-              : 'other',
-          )
-          .otherwise(constant<NodeKind>('other'));
-      },
-    )(initOpt);
+const classifyBindingKind = ({
+  sf,
+  inspector,
+  isExported,
+  type,
+  initOpt,
+}: {
+  readonly sf: ts.SourceFile;
+  readonly inspector: TypeInspector;
+  readonly isExported: boolean;
+  readonly type: ts.Type;
+  readonly initOpt: O.Option<ts.Expression>;
+}): NodeKind =>
+  O.match(
+    constant<NodeKind>('other'),
+    (initExpr: ts.Expression): NodeKind => {
+      const unwrapped = inspector.unwrapSatisfiesAndParens(initExpr);
+      return match(unwrapped)
+        .when(
+          (e) => inspector.isFlowCall(e) && isExported,
+          constant<NodeKind>('exported-flow'),
+        )
+        .when(inspector.isFlowCall, constant<NodeKind>('sub-flow'))
+        .when(constant(inspector.isOpticType(type)), constant<NodeKind>('optic'))
+        .when(
+          constant(inspector.isTypeclassInstance(type)),
+          constant<NodeKind>('typeclass-instance'),
+        )
+        .when(
+          (e) => containsTsPatternMatch({ sf, inspector, expr: e }),
+          constant<NodeKind>('adt-matcher'),
+        )
+        .when(ts.isArrowFunction, constant<NodeKind>('leaf-fn'))
+        .when(ts.isCallExpression, (e) =>
+          (inspector.isUnaryFunctionType(type) ||
+            (type.getCallSignatures().length > 0 &&
+              RA.every((s: ts.Signature) => s.getParameters().length <= 1)(
+                type.getCallSignatures(),
+              ))) &&
+          !inspector.isFlowCall(e)
+            ? 'partial-app'
+            : 'other',
+        )
+        .otherwise(constant<NodeKind>('other'));
+    },
+  )(initOpt);
 
 const countFlowSteps = (inspector: TypeInspector) => (initOpt: O.Option<ts.Expression>): O.Option<number> =>
   O.chain((expr: ts.Expression) => {
@@ -202,9 +219,7 @@ const hasExplicitReturnAnnotation =
     })(initOpt);
 
 const statementToBindings =
-  (sf: ts.SourceFile) =>
-  (checker: ts.TypeChecker) =>
-  (inspector: TypeInspector) =>
+  ({ sourceFile, checker, inspector }: ExtractModuleIRInput) =>
   (stmt: ts.VariableStatement): ReadonlyArray<BindingInfo> => {
     const isExported = hasExportModifier(stmt);
     return RA.chain((decl: ts.VariableDeclaration): ReadonlyArray<BindingInfo> => {
@@ -220,13 +235,13 @@ const statementToBindings =
         {
           name: decl.name.text,
           isExported,
-          kind: classifyBindingKind(sf)(inspector)(isExported)(type)(initOpt),
+          kind: classifyBindingKind({ sf: sourceFile, inspector, isExported, type, initOpt }),
           hasSatisfies,
           hasExplicitReturnType: hasExplicitReturn,
           signature: inspector.formatType(type),
           effects: inspector.detectEffects(type),
           stepCount: countFlowSteps(inspector)(initOpt),
-          location: inspector.getLocation(sf)(decl),
+          location: inspector.getLocation(sourceFile)(decl),
           declaration: decl,
           statement: stmt,
           initializer: initOpt,
@@ -235,19 +250,22 @@ const statementToBindings =
     })(stmt.declarationList.declarations);
   };
 
-const extractBindings =
-  (sf: ts.SourceFile) =>
-  (checker: ts.TypeChecker) =>
-  (inspector: TypeInspector): ReadonlyArray<BindingInfo> =>
-    flow(
-      RA.filter(ts.isVariableStatement),
-      RA.chain(statementToBindings(sf)(checker)(inspector)),
-    )(sf.statements);
+const extractBindings = (input: ExtractModuleIRInput): ReadonlyArray<BindingInfo> =>
+  flow(
+    RA.filter(ts.isVariableStatement),
+    RA.chain(statementToBindings(input)),
+  )(input.sourceFile.statements);
 
 const extractEdgesForBinding =
-  (sf: ts.SourceFile) =>
-  (inspector: TypeInspector) =>
-  (bindingNames: ReadonlyArray<string>) =>
+  ({
+    sf,
+    inspector,
+    bindingNames,
+  }: {
+    readonly sf: ts.SourceFile;
+    readonly inspector: TypeInspector;
+    readonly bindingNames: ReadonlyArray<string>;
+  }) =>
   (binding: BindingInfo): ReadonlyArray<TypeFlowEdge> =>
     O.match(
       constant([] as ReadonlyArray<TypeFlowEdge>),
@@ -283,12 +301,15 @@ const toTypeFlowNode = (b: BindingInfo): TypeFlowNode => ({
   stepCount: b.stepCount,
 });
 
-const buildModuleIR = ({ sourceFile, checker, inspector }: ExtractModuleIRInput): ModuleIR => {
+const buildModuleIR = (input: ExtractModuleIRInput): ModuleIR => {
+  const { sourceFile, inspector } = input;
   const imports = extractImports(sourceFile);
-  const typeDeclarations = extractTypeDeclarations(sourceFile)(checker)(inspector);
-  const bindings = extractBindings(sourceFile)(checker)(inspector);
+  const typeDeclarations = extractTypeDeclarations(input);
+  const bindings = extractBindings(input);
   const bindingNames = RA.map((b: BindingInfo) => b.name)(bindings);
-  const edges = RA.chain(extractEdgesForBinding(sourceFile)(inspector)(bindingNames))(bindings);
+  const edges = RA.chain(extractEdgesForBinding({ sf: sourceFile, inspector, bindingNames }))(
+    bindings,
+  );
   const typeFlowGraph: TypeFlowGraph = {
     nodes: RA.map(toTypeFlowNode)(bindings),
     edges,

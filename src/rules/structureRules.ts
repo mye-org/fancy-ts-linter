@@ -22,13 +22,17 @@ const isRuntimeExportStatement = (stmt: ts.Statement): boolean =>
   ts.isExportAssignment(stmt) ||
   (ts.isExportDeclaration(stmt) && !stmt.isTypeOnly);
 
+type StructureErrorInput = {
+  readonly ruleId: string;
+  readonly category: DiagnosticError['category'];
+  readonly node: ts.Node;
+  readonly message: string;
+  readonly fixGuidance: string;
+};
+
 const makeStructureError =
   (ctx: RuleContext) =>
-  (ruleId: string) =>
-  (category: DiagnosticError['category']) =>
-  (node: ts.Node) =>
-  (message: string) =>
-  (fixGuidance: string): DiagnosticError => ({
+  ({ ruleId, category, node, message, fixGuidance }: StructureErrorInput): DiagnosticError => ({
     ruleId,
     category,
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
@@ -43,16 +47,25 @@ const checkSingleExportCount = (ctx: RuleContext): ReadonlyArray<DiagnosticError
     () =>
       runtimeExports.length === 0
         ? [
-            makeStructureError(ctx)('single-exported-flow')('structure')(ctx.sourceFile)(
-              'Module must export exactly one runtime function defined via `flow(...)`, found 0.',
-            )(
-              'Add `export const main = flow(step1, step2) satisfies ExportedType;` as the sole runtime export.',
-            ),
+            makeStructureError(ctx)({
+              ruleId: 'single-exported-flow',
+              category: 'structure',
+              node: ctx.sourceFile,
+              message:
+                'Module must export exactly one runtime function defined via `flow(...)`, found 0.',
+              fixGuidance:
+                'Add `export const main = flow(step1, step2) satisfies ExportedType;` as the sole runtime export.',
+            }),
           ]
         : RA.map((stmt: ts.Statement) =>
-            makeStructureError(ctx)('single-exported-flow')('structure')(stmt)(
-              `Module must have exactly one runtime export, found ${runtimeExports.length}.`,
-            )('Keep only one exported `flow(...)` function and unexport all private helpers.'),
+            makeStructureError(ctx)({
+              ruleId: 'single-exported-flow',
+              category: 'structure',
+              node: stmt,
+              message: `Module must have exactly one runtime export, found ${runtimeExports.length}.`,
+              fixGuidance:
+                'Keep only one exported `flow(...)` function and unexport all private helpers.',
+            }),
           )(runtimeExports.slice(1)),
     constant([] as ReadonlyArray<DiagnosticError>),
   )(runtimeExports.length === 1);
@@ -64,16 +77,25 @@ const checkExportedIsFlowAndSatisfies = (ctx: RuleContext): ReadonlyArray<Diagno
     const flowErr =
       b.kind !== 'exported-flow'
         ? [
-            makeStructureError(ctx)('single-exported-flow')('structure')(b.declaration)(
-              `Exported binding \`${b.name}\` must be a \`flow(...)\` composition.`,
-            )('Define the exported function using `export const name = flow(a, b) satisfies FnType;`.'),
+            makeStructureError(ctx)({
+              ruleId: 'single-exported-flow',
+              category: 'structure',
+              node: b.declaration,
+              message: `Exported binding \`${b.name}\` must be a \`flow(...)\` composition.`,
+              fixGuidance:
+                'Define the exported function using `export const name = flow(a, b) satisfies FnType;`.',
+            }),
           ]
         : ([] as ReadonlyArray<DiagnosticError>);
     const satisfiesErr = !b.hasSatisfies
       ? [
-          makeStructureError(ctx)('export-requires-satisfies')('export-satisfies')(b.declaration)(
-            `Exported function \`${b.name}\` must use the \`satisfies\` keyword to pin its type contract.`,
-          )('Append `satisfies ExportedFnType` after `flow(...)`.'),
+          makeStructureError(ctx)({
+            ruleId: 'export-requires-satisfies',
+            category: 'export-satisfies',
+            node: b.declaration,
+            message: `Exported function \`${b.name}\` must use the \`satisfies\` keyword to pin its type contract.`,
+            fixGuidance: 'Append `satisfies ExportedFnType` after `flow(...)`.',
+          }),
         ]
       : ([] as ReadonlyArray<DiagnosticError>);
     return [...flowErr, ...satisfiesErr];
@@ -94,9 +116,15 @@ const checkDisallowedTopLevelStatements = (ctx: RuleContext): ReadonlyArray<Diag
   flow(
     RA.filter(isDisallowedTopLevelStatement),
     RA.map((stmt: ts.Statement) =>
-      makeStructureError(ctx)('no-disallowed-top-level')('structure')(stmt)(
-        'Disallowed top-level declaration. Only imports, types, private const functions/optics/matchers, and one exported `flow` are allowed.',
-      )('Convert to `type` / `export type` or a private `const` unary arrow function / `flow`.'),
+      makeStructureError(ctx)({
+        ruleId: 'no-disallowed-top-level',
+        category: 'structure',
+        node: stmt,
+        message:
+          'Disallowed top-level declaration. Only imports, types, private const functions/optics/matchers, and one exported `flow` are allowed.',
+        fixGuidance:
+          'Convert to `type` / `export type` or a private `const` unary arrow function / `flow`.',
+      }),
     ),
   )(ctx.sourceFile.statements);
 
@@ -104,11 +132,14 @@ const checkDisallowedOtherBindings = (ctx: RuleContext): ReadonlyArray<Diagnosti
   flow(
     RA.filter((b: BindingInfo) => !b.isExported && b.kind === 'other'),
     RA.map((b: BindingInfo) =>
-      makeStructureError(ctx)('no-disallowed-top-level')('structure')(b.declaration)(
-        `Top-level constant \`${b.name}\` is not a unary function, \`flow\`, Optic, ADT matcher, or typeclass instance.`,
-      )(
-        'Inline into a domain type/function, convert to a unary function/Optic, or lift into a module parameter.',
-      ),
+      makeStructureError(ctx)({
+        ruleId: 'no-disallowed-top-level',
+        category: 'structure',
+        node: b.declaration,
+        message: `Top-level constant \`${b.name}\` is not a unary function, \`flow\`, Optic, ADT matcher, or typeclass instance.`,
+        fixGuidance:
+          'Inline into a domain type/function, convert to a unary function/Optic, or lift into a module parameter.',
+      }),
     ),
   )(ctx.ir.bindings);
 

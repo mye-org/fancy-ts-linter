@@ -69,4 +69,12 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
       ),
     ).toBe(true);
   });
+
+  it('emits arity-strategy hints on deep curried chains in deepCurry.ts', () => {
+    const report = analyzeOne('test/fixtures/violations/deepCurry.ts');
+    const arityHints = report.hints.filter((h) => h.category === 'arity-strategy');
+    expect(arityHints.length).toBe(2);
+    expect(arityHints.some((h) => h.evidence.includes('4 nested parameter levels'))).toBe(true);
+    expect(arityHints.some((h) => h.evidence.includes('3 nested parameter levels'))).toBe(true);
+  });
 });

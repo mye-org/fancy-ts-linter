@@ -58,4 +58,12 @@ describe('Tier 1 Hard-Error Rules', () => {
     expect(ruleIds.has('unary-arity-only')).toBe(true);
     expect(ruleIds.has('no-nullable-types')).toBe(true);
   });
+
+  it('flags curried chains deeper than 3 levels with max-curry-depth in deepCurry.ts', () => {
+    const report = analyzeOne('test/fixtures/violations/deepCurry.ts');
+    expect(report.passed).toBe(false);
+    const curryErrors = report.errors.filter((e) => e.ruleId === 'max-curry-depth');
+    expect(curryErrors.length).toBe(1);
+    expect(curryErrors[0]?.message).toContain('depth 4');
+  });
 });

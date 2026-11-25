@@ -115,27 +115,32 @@ const buildProgramWith =
 const getDiagLength = (diag: ts.Diagnostic) =>
   O.getOrElse(constant(0))(O.fromNullable(diag.length));
 
-const lineCharFromPositions =
-  (sf: ts.SourceFile) =>
-  (startPos: number) =>
-  (endPos: number): SourceLocation => ({
-    line: sf.getLineAndCharacterOfPosition(startPos).line + 1,
-    column: sf.getLineAndCharacterOfPosition(startPos).character + 1,
-    endLine: sf.getLineAndCharacterOfPosition(endPos).line + 1,
-    endColumn: sf.getLineAndCharacterOfPosition(endPos).character + 1,
-  });
+const lineCharFromPositions = ({
+  sf,
+  startPos,
+  endPos,
+}: {
+  readonly sf: ts.SourceFile;
+  readonly startPos: number;
+  readonly endPos: number;
+}): SourceLocation => ({
+  line: sf.getLineAndCharacterOfPosition(startPos).line + 1,
+  column: sf.getLineAndCharacterOfPosition(startPos).character + 1,
+  endLine: sf.getLineAndCharacterOfPosition(endPos).line + 1,
+  endColumn: sf.getLineAndCharacterOfPosition(endPos).character + 1,
+});
 
 const toDiagnosticLocation =
   (sf: ts.SourceFile) =>
   (diag: ts.Diagnostic): SourceLocation =>
     O.match(
       constant({ line: 1, column: 1, endLine: 1, endColumn: 1 }),
-      (start: number) => lineCharFromPositions(sf)(start)(start + getDiagLength(diag)),
+      (start: number) =>
+        lineCharFromPositions({ sf, startPos: start, endPos: start + getDiagLength(diag) }),
     )(O.fromNullable(diag.start));
 
 const sliceSnippet =
-  (sf: ts.SourceFile) =>
-  (len: number) =>
+  ({ sf, len }: { readonly sf: ts.SourceFile; readonly len: number }) =>
   (start: number): string =>
     sf.text
       .slice(start, start + Math.min(len, 80))
@@ -147,7 +152,7 @@ const formatDiagSnippet =
   (diag: ts.Diagnostic): string =>
     O.match(
       constant(''),
-      sliceSnippet(sf)(O.getOrElse(constant(40))(O.fromNullable(diag.length))),
+      sliceSnippet({ sf, len: O.getOrElse(constant(40))(O.fromNullable(diag.length)) }),
     )(O.fromNullable(diag.start));
 
 const mapTscDiagnostic =

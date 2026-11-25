@@ -99,7 +99,8 @@ export const priceOrder = flow(
 | `no-pipe` | `point-free` | Forbids `pipe(...)` everywhere |
 | `no-nested-flow` | `point-free` | Forbids `flow(...)` nested inside another `flow(...)` |
 | `no-trivial-flow` | `point-free` | Forbids 0-step or 1-step `flow(f)` |
-| `unary-arity-only` | `point-free` | All functions must have arity `1` (curried unary factories allowed) |
+| `unary-arity-only` | `point-free` | All functions must have arity 1 (use a named Input/Domain Record, or at most 2–3 curried levels when partially applied) |
+| `max-curry-depth` | `point-free` | Forbids curried chains deeper than 3 levels (`a => b => c => d => ...`); collapse into an input record or 2-level `(ctx) => (input)` |
 | `no-inline-lambda` | `point-free` | Forbids anonymous lambdas inside `flow(...)` or combinator arguments |
 | `no-eta-reducible` | `point-free` | Forbids `x => f(x)` wrappers |
 | `no-block-body` | `declarative-purity` | Forbids `{ ... }` block bodies on functions |
@@ -122,7 +123,7 @@ export const priceOrder = flow(
 | `newtype-brand` | Raw `string`/`number` domain fields in exported types | Suggests `newtype-ts` `Newtype<...>` + `iso`/`prism` |
 | `pattern-matching-depth` | Shallow 1-level `match` whose handlers branch again | Suggests `P.when`, `P.select`, `P.union`, and tuple matrix matching |
 | `ddd-decomposition` | `flow` exceeding `--max-flow-steps`, or mixed pure + I/O steps | Suggests named sub-flows and pure `Either` core / `TaskEither` shell split |
-| `arity-strategy` | Multi-parameter functions | Advises **curry data-last** (config/predicates) vs. **Domain Record** (peer fields) |
+| `arity-strategy` | Multi-parameter functions or curried chains of 3+ levels | Advises **Input/Domain Record** (`(input: FnInput) => ...`) by default, or **at most 2–3 curried levels** only when outer args are partially applied |
 | `monad` | Threaded config/deps across helpers or `Array<Effect<T>>` | Suggests `Reader`/`ReaderTaskEither` or `RA.traverse` |
 | `optic` | Repeated nested property chains or spread + array `.map` | Suggests `Lens.fromPath` or `Traversal` |
 | `declarative-combinator` | Self-recursion or manual `reduce` | Suggests `RA.filterMap`, `RA.partitionMap`, `Monoid.concatAll` |

@@ -11,12 +11,16 @@ const collectAllNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts
   ...RA.chain(collectAllNodes(sf))(node.getChildren(sf)),
 ];
 
+type BranchErrorInput = {
+  readonly ruleId: string;
+  readonly node: ts.Node;
+  readonly message: string;
+  readonly fixGuidance: string;
+};
+
 const makeBranchError =
   (ctx: RuleContext) =>
-  (ruleId: string) =>
-  (node: ts.Node) =>
-  (message: string) =>
-  (fixGuidance: string): DiagnosticError => ({
+  ({ ruleId, node, message, fixGuidance }: BranchErrorInput): DiagnosticError => ({
     ruleId,
     category: 'branching',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
@@ -31,11 +35,13 @@ const checkNoTernary =
     flow(
       RA.filter(ts.isConditionalExpression),
       RA.map((n: ts.ConditionalExpression) =>
-        makeBranchError(ctx)('no-ternary')(n)(
-          'Ternary operator `? :` is forbidden.',
-        )(
-          'Use `fp-ts` (`B.match`, `O.fromPredicate`, `E.fromPredicate`), exhaustive record dispatch, or `ts-pattern`.',
-        ),
+        makeBranchError(ctx)({
+          ruleId: 'no-ternary',
+          node: n,
+          message: 'Ternary operator `? :` is forbidden.',
+          fixGuidance:
+            'Use `fp-ts` (`B.match`, `O.fromPredicate`, `E.fromPredicate`), exhaustive record dispatch, or `ts-pattern`.',
+        }),
       ),
     )(nodes);
 
@@ -53,9 +59,13 @@ const checkNoNullishOperators =
     flow(
       RA.filter((n: ts.Node) => isOptionalChainNode(n) || isNullishCoalescingNode(n)),
       RA.map((n: ts.Node) =>
-        makeBranchError(ctx)('no-nullish-operators')(n)(
-          'Optional chaining `?.` and nullish coalescing `??` are forbidden.',
-        )('Lift nullable values into `fp-ts/Option` via `O.fromNullable` and compose with `O.map` / `O.getOrElse`.'),
+        makeBranchError(ctx)({
+          ruleId: 'no-nullish-operators',
+          node: n,
+          message: 'Optional chaining `?.` and nullish coalescing `??` are forbidden.',
+          fixGuidance:
+            'Lift nullable values into `fp-ts/Option` via `O.fromNullable` and compose with `O.map` / `O.getOrElse`.',
+        }),
       ),
     )(nodes);
 
@@ -102,9 +112,13 @@ const checkTsPatternExhaustive =
           isTsPatternMatchRoot(ctx)(n) && !endsInExhaustive(n),
       ),
       RA.map((n: ts.CallExpression) =>
-        makeBranchError(ctx)('ts-pattern-exhaustive')(n)(
-          '`ts-pattern` `match(...)` chain must terminate with `.exhaustive()`.',
-        )('Replace `.otherwise(...)` / `.run()` with explicit `.with(...)` cases and `.exhaustive()`.'),
+        makeBranchError(ctx)({
+          ruleId: 'ts-pattern-exhaustive',
+          node: n,
+          message: '`ts-pattern` `match(...)` chain must terminate with `.exhaustive()`.',
+          fixGuidance:
+            'Replace `.otherwise(...)` / `.run()` with explicit `.with(...)` cases and `.exhaustive()`.',
+        }),
       ),
     )(nodes);
 

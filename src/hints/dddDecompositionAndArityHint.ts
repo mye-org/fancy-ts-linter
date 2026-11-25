@@ -95,11 +95,54 @@ const checkMultiParamArityStrategy = (ctx: RuleContext): ReadonlyArray<AgentHint
         location: { line: loc.line, column: loc.column },
         evidence: `Function at line ${loc.line} has ${n.parameters.length} parameters.`,
         suggestion: hasFnOrConfig
-          ? 'Curry **data-last** (`(configOrPredicate) => (domainData) => result`) so partial application (`const a0 = a1(a2)`) composes point-free in `flow`.'
+          ? 'Keep currying to **at most 2–3 levels** (`(configOrContext) => (input: InputRecord) => result`) and only when outer args are partially applied; otherwise use a single named **Domain/Input Record**.'
           : 'Bundle cohesive peer parameters into a single named **Domain Record** type (`export type Input = { ... }`).',
         suggestedSignature: O.none,
         researchQuestions: [
-          'Are these parameters configuration/behavior (curry data-last) or peer fields of one domain concept (Domain Record)?',
+          'Are these parameters configuration/behavior reused across calls (2-step curry) or peer fields of one call (Domain Record)?',
+        ],
+      },
+    ];
+  })(nodes);
+};
+
+const unwrapParens = (node: ts.Expression): ts.Expression =>
+  ts.isParenthesizedExpression(node) ? unwrapParens(node.expression) : node;
+
+const countCurryDepth = (arrow: ts.ArrowFunction): number => {
+  if (ts.isBlock(arrow.body)) {
+    return 1;
+  }
+  const body = unwrapParens(arrow.body);
+  return ts.isArrowFunction(body) ? 1 + countCurryDepth(body) : 1;
+};
+
+const isCurriedRoot = (n: ts.Node): n is ts.ArrowFunction =>
+  ts.isArrowFunction(n) && !(n.parent !== undefined && ts.isArrowFunction(n.parent));
+
+const checkDeepCurryChain = (ctx: RuleContext): ReadonlyArray<AgentHint> => {
+  const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
+  return RA.chain((n: ts.Node): ReadonlyArray<AgentHint> => {
+    if (!isCurriedRoot(n)) {
+      return [];
+    }
+    const depth = countCurryDepth(n);
+    if (depth < 3) {
+      return [];
+    }
+    const loc = ctx.inspector.getLocation(ctx.sourceFile)(n);
+    return [
+      {
+        hintId: `arity-curry-depth-${loc.line}-${loc.column}`,
+        category: 'arity-strategy',
+        priority: depth >= 4 ? 'high' : 'medium',
+        location: { line: loc.line, column: loc.column },
+        evidence: `Curried function at line ${loc.line} has ${depth} nested parameter levels.`,
+        suggestion:
+          'Avoid long curried chains (positional ambiguity, closure & type-checking overhead). Collapse parameters into a single named input object (`(input: FnInput) => ...`), or use a 2-step curry (`(ctx) => (input: FnInput) => ...`) only if the outer argument is partially applied.',
+        suggestedSignature: O.none,
+        researchQuestions: [
+          'Are all arguments supplied at once at call sites (use a single input record), or is the outer argument genuinely reused via partial application (2-step curry)?',
         ],
       },
     ];
@@ -110,6 +153,7 @@ const runDddAndArityHints = (ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...checkLongFlows(ctx),
   ...checkMixedPureAndIo(ctx),
   ...checkMultiParamArityStrategy(ctx),
+  ...checkDeepCurryChain(ctx),
 ];
 
 const identityCtx = (ctx: RuleContext) => ctx;
