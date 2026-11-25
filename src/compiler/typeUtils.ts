@@ -9,17 +9,11 @@ import type { SourceLocation, TypeInspector } from '../model/report.js';
 
 export type CreateTypeInspector = (checker: ts.TypeChecker) => TypeInspector;
 
-const isStringElem = (target: string) => (list: ReadonlyArray<string>) =>
-  RA.elem(S.Eq)(target)(list);
-
-const getPosLineChar = (sf: ts.SourceFile) => (pos: number) =>
-  sf.getLineAndCharacterOfPosition(pos);
-
 const makeLocation = (sf: ts.SourceFile) => (node: ts.Node): SourceLocation => ({
-  line: getPosLineChar(sf)(node.getStart(sf)).line + 1,
-  column: getPosLineChar(sf)(node.getStart(sf)).character + 1,
-  endLine: getPosLineChar(sf)(node.getEnd()).line + 1,
-  endColumn: getPosLineChar(sf)(node.getEnd()).character + 1,
+  line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1,
+  column: sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1,
+  endLine: sf.getLineAndCharacterOfPosition(node.getEnd()).line + 1,
+  endColumn: sf.getLineAndCharacterOfPosition(node.getEnd()).character + 1,
 });
 
 const getNodeText = (sf: ts.SourceFile) => (node: ts.Node) => node.getText(sf);
@@ -51,11 +45,10 @@ const unwrapSatisfiesAndParens = (expr: ts.Expression): ts.Expression =>
     .otherwise(identity);
 
 const readSymbolName = (s: ts.Symbol) => s.getName();
-const getSymbolNameOpt = (symOpt: O.Option<ts.Symbol>): O.Option<string> =>
-  O.map(readSymbolName)(symOpt);
+const getSymbolNameOpt = O.map(readSymbolName);
 
 const getDeclSourceFileName = (d: ts.Declaration) => d.getSourceFile().fileName;
-const getFirstDecl = (sym: ts.Symbol) => O.fromNullable(sym.declarations?.[0]);
+const getFirstDecl = (sym: ts.Symbol) => O.chain(RA.head)(O.fromNullable(sym.declarations));
 const getFirstDeclFile = flow(getFirstDecl, O.map(getDeclSourceFileName));
 
 const includesFragment = (fragment: string) => (file: string) => file.includes(fragment);
@@ -66,15 +59,19 @@ const symbolFrom = (fragment: string) => (sym: ts.Symbol) =>
 const matchesFpTsSymbol = (name: string) => (sym: ts.Symbol) =>
   sym.getName() === name && symbolFrom('fp-ts')(sym);
 
-const isFpTsFunctionSymbol = (name: string) => (checker: ts.TypeChecker) => (expr: ts.Expression) =>
-  O.exists(matchesFpTsSymbol(name))(O.fromNullable(checker.getSymbolAtLocation(expr)));
+const isFpTsFunctionSymbol =
+  ({ name, checker }: { readonly name: string; readonly checker: ts.TypeChecker }) =>
+  (expr: ts.Expression) =>
+    O.exists(matchesFpTsSymbol(name))(O.fromNullable(checker.getSymbolAtLocation(expr)));
 
-const isCallNamed = (name: string) => (checker: ts.TypeChecker) => (node: ts.Node) =>
-  ts.isCallExpression(node) &&
-  (isFpTsFunctionSymbol(name)(checker)(node.expression) ||
-    (ts.isIdentifier(node.expression) && node.expression.text === name));
+const isCallNamed =
+  ({ name, checker }: { readonly name: string; readonly checker: ts.TypeChecker }) =>
+  (node: ts.Node) =>
+    ts.isCallExpression(node) &&
+    (isFpTsFunctionSymbol({ name, checker })(node.expression) ||
+      (ts.isIdentifier(node.expression) && node.expression.text === name));
 
-const getEffectiveSymbol = (t: ts.Type): O.Option<ts.Symbol> =>
+const getEffectiveSymbol = (t: ts.Type) =>
   O.alt(constant(O.fromNullable(t.getSymbol())))(O.fromNullable(t.aliasSymbol));
 
 const getTypeSymbolName = flow(getEffectiveSymbol, getSymbolNameOpt);
@@ -86,34 +83,25 @@ const isUnaryFunctionType = (checker: ts.TypeChecker) => (type: ts.Type): boolea
   RA.every(isUnarySig)(type.getCallSignatures()) &&
   Boolean(checker);
 
-const opticNames: ReadonlyArray<string> = [
-  'Lens',
-  'Prism',
-  'Optional',
-  'Traversal',
-  'Iso',
-  'Getter',
-  'Setter',
-  'Fold',
-];
-
-const typeclassNames: ReadonlyArray<string> = [
-  'Eq',
-  'Ord',
-  'Semigroup',
-  'Monoid',
-  'Show',
-];
-
 const matchesOpticSymbol = (sym: ts.Symbol) =>
-  isStringElem(sym.getName())(opticNames) &&
+  RA.elem(S.Eq)(sym.getName())([
+    'Lens',
+    'Prism',
+    'Optional',
+    'Traversal',
+    'Iso',
+    'Getter',
+    'Setter',
+    'Fold',
+  ]) &&
   (symbolFrom('monocle-ts')(sym) || symbolFrom('newtype-ts')(sym));
 
 const isOpticType = (_checker: ts.TypeChecker) => (type: ts.Type): boolean =>
   O.exists(matchesOpticSymbol)(getEffectiveSymbol(type));
 
 const matchesTypeclassSymbol = (sym: ts.Symbol) =>
-  isStringElem(sym.getName())(typeclassNames) && symbolFrom('fp-ts')(sym);
+  RA.elem(S.Eq)(sym.getName())(['Eq', 'Ord', 'Semigroup', 'Monoid', 'Show']) &&
+  symbolFrom('fp-ts')(sym);
 
 const isTypeclassInstance = (_checker: ts.TypeChecker) => (type: ts.Type): boolean =>
   O.exists(matchesTypeclassSymbol)(getEffectiveSymbol(type));
@@ -127,7 +115,7 @@ const isNewtypeBrand = (_checker: ts.TypeChecker) => (type: ts.Type): boolean =>
   O.exists(isNewtypeAlias)(O.fromNullable(type.aliasSymbol)) ||
   RA.some(isUriProp)(type.getProperties());
 
-const isTsPatternMatchCall = (node: ts.Node): boolean =>
+const isTsPatternMatchCall = (node: ts.Node) =>
   ts.isCallExpression(node) &&
   ts.isPropertyAccessExpression(node.expression) &&
   node.expression.name.text === 'exhaustive';
@@ -135,21 +123,21 @@ const isTsPatternMatchCall = (node: ts.Node): boolean =>
 const isNullOrUndefinedFlag = (t: ts.Type) =>
   (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
 
-const containerNames: ReadonlyArray<string> = [
-  'Option',
-  'None',
-  'Some',
-  'Either',
-  'Task',
-  'TaskEither',
-  'Reader',
-  'ReaderTask',
-  'ReaderTaskEither',
-  'State',
-  'IO',
-];
+const isContainerName = (name: string) =>
+  RA.elem(S.Eq)(name)([
+    'Option',
+    'None',
+    'Some',
+    'Either',
+    'Task',
+    'TaskEither',
+    'Reader',
+    'ReaderTask',
+    'ReaderTaskEither',
+    'State',
+    'IO',
+  ]);
 
-const isContainerName = (name: string) => isStringElem(name)(containerNames);
 const isOptionOrEffectContainer = (t: ts.Type) =>
   O.exists(isContainerName)(getTypeSymbolName(t));
 
@@ -176,12 +164,12 @@ const isPromiseType = (t: ts.Type) => O.exists(isPromiseName)(getTypeSymbolName(
 const isTypeReference = (t: ts.Type): t is ts.TypeReference =>
   'target' in t && 'typeArguments' in t;
 
-const getTypeArgsFromRef = (checker: ts.TypeChecker) => (ref: ts.TypeReference) =>
-  checker.getTypeArguments(ref);
+const getTypeArgsFromRef = (checker: ts.TypeChecker) =>
+  checker.getTypeArguments.bind(checker);
 
 const getTypeArgs = (checker: ts.TypeChecker) => (t: ts.Type): ReadonlyArray<ts.Type> =>
   O.match(
-    constant([] as ReadonlyArray<ts.Type>),
+    constant<ReadonlyArray<ts.Type>>([]),
     getTypeArgsFromRef(checker),
   )(O.fromPredicate(isTypeReference)(t));
 
@@ -195,57 +183,58 @@ const hasRawPromise = (checker: ts.TypeChecker) => (type: ts.Type): boolean =>
     constant(false),
   )(isOptionOrEffectContainer(type));
 
-const boundaryMethods: ReadonlyArray<string> = [
-  'fromNullable',
-  'fromNullableK',
-  'tryCatch',
-  'tryCatchK',
-  'of',
-];
-
 const isBoundaryLiftCall = (_checker: ts.TypeChecker) => (node: ts.Node): boolean =>
   ts.isCallExpression(node) &&
   ts.isPropertyAccessExpression(node.expression) &&
-  isStringElem(node.expression.name.text)(boundaryMethods);
-
-const effectMap: ReadonlyArray<readonly [string, string]> = [
-  ['ReaderTaskEither', 'ReaderTaskEither'],
-  ['TaskEither', 'TaskEither'],
-  ['ReaderTask', 'ReaderTask'],
-  ['Task', 'Task'],
-  ['Either', 'Either'],
-  ['Option', 'Option'],
-  ['Reader', 'Reader'],
-  ['State', 'State'],
-  ['IO', 'IO'],
-];
+  RA.elem(S.Eq)(node.expression.name.text)([
+    'fromNullable',
+    'fromNullableK',
+    'tryCatch',
+    'tryCatchK',
+    'of',
+  ]);
 
 const matchesEffectKey = (name: string) => (e: readonly [string, string]) => e[0] === name;
 
 const findEffectEntry = (name: string) =>
-  RA.findFirst(matchesEffectKey(name))(effectMap);
+  RA.findFirst(matchesEffectKey(name))([
+    ['ReaderTaskEither', 'ReaderTaskEither'],
+    ['TaskEither', 'TaskEither'],
+    ['ReaderTask', 'ReaderTask'],
+    ['Task', 'Task'],
+    ['Either', 'Either'],
+    ['Option', 'Option'],
+    ['Reader', 'Reader'],
+    ['State', 'State'],
+    ['IO', 'IO'],
+  ] as const);
 
-const entryToArray = (entry: readonly [string, string]): ReadonlyArray<string> => [entry[1]];
+const entryToArray = (entry: readonly [string, string]) => [entry[1]];
 
 const collectEffectsForName =
-  (checker: ts.TypeChecker) =>
-  (type: ts.Type) =>
+  ({ checker, type }: { readonly checker: ts.TypeChecker; readonly type: ts.Type }) =>
   (name: string): ReadonlyArray<string> =>
     O.match(
       constant(RA.chain(collectEffectsFromType(checker))(getTypeArgs(checker)(type))),
       entryToArray,
     )(findEffectEntry(name));
 
-const unwrapOptEffects =
-  (checker: ts.TypeChecker) =>
-  (type: ts.Type) =>
-  (opt: O.Option<string>): ReadonlyArray<string> =>
-    O.match(constant([] as ReadonlyArray<string>), collectEffectsForName(checker)(type))(opt);
+const unwrapOptEffects = ({
+  checker,
+  type,
+}: {
+  readonly checker: ts.TypeChecker;
+  readonly type: ts.Type;
+}) =>
+  O.match(
+    constant<ReadonlyArray<string>>([]),
+    collectEffectsForName({ checker, type }),
+  );
 
 const collectEffectsFromType = (checker: ts.TypeChecker) => (type: ts.Type): ReadonlyArray<string> =>
   match(getTypeSymbolName(type))
-    .with(P.when(O.isSome), unwrapOptEffects(checker)(type))
-    .otherwise(constant([] as ReadonlyArray<string>));
+    .with(P.when(O.isSome), unwrapOptEffects({ checker, type }))
+    .otherwise(constant<ReadonlyArray<string>>([]));
 
 const dedupeStrings = RA.uniq(S.Eq);
 
@@ -255,7 +244,7 @@ const collectSigReturnEffects = (checker: ts.TypeChecker) => (sig: ts.Signature)
 const collectCallEffects = (checker: ts.TypeChecker) => (t: ts.Type) =>
   RA.chain(collectSigReturnEffects(checker))(t.getCallSignatures());
 
-const fallbackPure = (effects: ReadonlyArray<string>): ReadonlyArray<string> =>
+const fallbackPure = (effects: ReadonlyArray<string>) =>
   B.match(constant(effects), constant(['Pure']))(effects.length === 0);
 
 const detectEffects = (checker: ts.TypeChecker) =>
@@ -265,15 +254,14 @@ const detectEffects = (checker: ts.TypeChecker) =>
     fallbackPure,
   );
 
-const formatTypeWith = (checker: ts.TypeChecker) => (t: ts.Type) =>
-  checker.typeToString(t);
+const formatTypeWith = (checker: ts.TypeChecker) => checker.typeToString.bind(checker);
 
-const buildInspector = (checker: ts.TypeChecker): TypeInspector => ({
+const buildInspector = (checker: ts.TypeChecker) => ({
   getLocation: makeLocation,
   getSnippet: makeSnippet,
   unwrapSatisfiesAndParens,
-  isFlowCall: isCallNamed('flow')(checker),
-  isPipeCall: isCallNamed('pipe')(checker),
+  isFlowCall: isCallNamed({ name: 'flow', checker }),
+  isPipeCall: isCallNamed({ name: 'pipe', checker }),
   isUnaryFunctionType: isUnaryFunctionType(checker),
   isOpticType: isOpticType(checker),
   isTypeclassInstance: isTypeclassInstance(checker),

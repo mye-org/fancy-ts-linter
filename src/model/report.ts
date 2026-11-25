@@ -1,6 +1,7 @@
 import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
+import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
 
 export type SourceLocation = {
@@ -196,20 +197,23 @@ export type ReportInput = {
 
 export type BuildAnalysisReport = (input: ReportInput) => AnalysisReport;
 
+const typeFlowGraphLens = Lens.fromPath<ReportInput>()(['ir', 'typeFlowGraph']);
+const irLens = Lens.fromProp<ReportInput>()('ir');
+
 const isExportedFlowBinding = (binding: BindingInfo) =>
   binding.isExported && binding.kind === 'exported-flow';
 
-const findExportedBinding = (ir: ModuleIR): O.Option<BindingInfo> =>
+const findExportedBinding = (ir: ModuleIR) =>
   RA.findFirst(isExportedFlowBinding)(ir.bindings);
 
 const getBindingName = (b: BindingInfo) => b.name;
 const getBindingSignature = (b: BindingInfo) => b.signature;
 
-const toSummary = (input: ReportInput): AnalysisSummary => ({
-  errorCount: input.errors.length,
-  hintCount: input.hints.length,
-  exportedFunction: O.map(getBindingName)(findExportedBinding(input.ir)),
-  exportedSignature: O.map(getBindingSignature)(findExportedBinding(input.ir)),
+const toSummary = (input: ReportInput) => ({
+  errorCount: RA.size(input.errors),
+  hintCount: RA.size(input.hints),
+  exportedFunction: O.map(getBindingName)(findExportedBinding(irLens.get(input))),
+  exportedSignature: O.map(getBindingSignature)(findExportedBinding(irLens.get(input))),
 });
 
 const attachSummary = (input: ReportInput) => ({
@@ -223,13 +227,13 @@ const assembleReport = ({
 }: {
   readonly input: ReportInput;
   readonly summary: AnalysisSummary;
-}): AnalysisReport => ({
+}) => ({
   filePath: input.filePath,
-  passed: input.errors.length === 0,
+  passed: RA.isEmpty(input.errors),
   summary,
   errors: input.errors,
   hints: input.hints,
-  typeFlowGraph: input.ir.typeFlowGraph,
+  typeFlowGraph: typeFlowGraphLens.get(input),
 });
 
 export const buildAnalysisReport = flow(
