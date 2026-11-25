@@ -28,7 +28,6 @@ describe('CLI runner & reporters', () => {
     expect(res.exitCode).toBe(1);
     expect(res.stdout).toContain('## [FAIL]');
     expect(res.stdout).toContain('### Blocking Errors');
-    expect(res.stdout).toContain('### Module Type-Flow Map');
   });
 
   it('returns exitCode 2 when no files are provided', () => {

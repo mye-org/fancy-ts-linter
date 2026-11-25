@@ -5,8 +5,6 @@ import type {
   AgentHint,
   AnalysisReport,
   DiagnosticError,
-  TypeFlowEdge,
-  TypeFlowNode,
 } from '../model/report.js';
 
 export type FormatReports = (reports: ReadonlyArray<AnalysisReport>) => string;
@@ -16,12 +14,6 @@ const formatErrorLine = (e: DiagnosticError): string =>
 
 const formatHintLine = (h: AgentHint): string =>
   `- **[${h.priority.toUpperCase()} | ${h.category}]** \`L${h.location.line}:${h.location.column}\`: ${h.evidence}\n  - Suggestion: ${h.suggestion}${O.match(constant(''), (s: string) => `\n  - Signature: \`${s}\``)(h.suggestedSignature)}\n  - Research: ${h.researchQuestions.join(' | ')}`;
-
-const formatNodeLine = (n: TypeFlowNode): string =>
-  `- \`${n.name}\` (${n.kind}, effects: [${n.effects.join(', ')}]): \`${n.signature}\``;
-
-const formatEdgeLine = (e: TypeFlowEdge): string =>
-  `- \`${e.from}\` --(${e.role})--> \`${e.to}\``;
 
 const formatSingleReport = (r: AnalysisReport): string => {
   const status = r.passed ? 'PASS' : 'FAIL';
@@ -40,16 +32,7 @@ const formatSingleReport = (r: AnalysisReport): string => {
       ? '### AI Refactoring & DDD Hints\nNone.'
       : `### AI Refactoring & DDD Hints\n${RA.map(formatHintLine)(r.hints).join('\n')}`;
 
-  const graphSection =
-    r.typeFlowGraph.nodes.length === 0
-      ? '### Module Type-Flow Map\n(empty)'
-      : `### Module Type-Flow Map\n${RA.map(formatNodeLine)(r.typeFlowGraph.nodes).join('\n')}${
-          r.typeFlowGraph.edges.length > 0
-            ? `\n\n**Edges:**\n${RA.map(formatEdgeLine)(r.typeFlowGraph.edges).join('\n')}`
-            : ''
-        }`;
-
-  return [header, errorSection, hintSection, graphSection].join('\n\n');
+  return [header, errorSection, hintSection].join('\n\n');
 };
 
 const joinReports = (parts: ReadonlyArray<string>): string => parts.join('\n\n---\n\n');
