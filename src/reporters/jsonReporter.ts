@@ -1,9 +1,19 @@
 import { constant, flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
-import type { AgentHint, AnalysisReport, TypeFlowNode } from '../model/report.js';
+import { match, P } from 'ts-pattern';
+import type {
+  AgentHint,
+  AnalysisReport,
+  AnalysisSummary,
+  TypeFlowGraph,
+  TypeFlowNode,
+} from '../model/report.js';
 
 export type FormatReports = (reports: ReadonlyArray<AnalysisReport>) => string;
+
+const toSuggestedSignatureField = (suggestedSignature: string) => ({ suggestedSignature });
+const toStepCountField = (stepCount: number) => ({ stepCount });
 
 const serializeHint = (h: AgentHint) => ({
   hintId: h.hintId,
@@ -12,7 +22,7 @@ const serializeHint = (h: AgentHint) => ({
   location: h.location,
   evidence: h.evidence,
   suggestion: h.suggestion,
-  ...(O.isSome(h.suggestedSignature) ? { suggestedSignature: h.suggestedSignature.value } : {}),
+  ...O.match(constant({}), toSuggestedSignatureField)(h.suggestedSignature),
   researchQuestions: h.researchQuestions,
 });
 
@@ -21,28 +31,34 @@ const serializeNode = (n: TypeFlowNode) => ({
   kind: n.kind,
   signature: n.signature,
   effects: n.effects,
-  ...(O.isSome(n.stepCount) ? { stepCount: n.stepCount.value } : {}),
+  ...O.match(constant({}), toStepCountField)(n.stepCount),
+});
+
+const serializeSummary = (s: AnalysisSummary) => ({
+  errorCount: s.errorCount,
+  hintCount: s.hintCount,
+  exportedFunction: O.getOrElse(constant(''))(s.exportedFunction),
+  exportedSignature: O.getOrElse(constant(''))(s.exportedSignature),
+});
+
+const serializeGraph = (g: TypeFlowGraph) => ({
+  nodes: RA.map(serializeNode)(g.nodes),
+  edges: g.edges,
 });
 
 const serializeReport = (r: AnalysisReport) => ({
   filePath: r.filePath,
   passed: r.passed,
-  summary: {
-    errorCount: r.summary.errorCount,
-    hintCount: r.summary.hintCount,
-    exportedFunction: O.getOrElse(constant(''))(r.summary.exportedFunction),
-    exportedSignature: O.getOrElse(constant(''))(r.summary.exportedSignature),
-  },
+  summary: serializeSummary(r.summary),
   errors: r.errors,
   hints: RA.map(serializeHint)(r.hints),
-  typeFlowGraph: {
-    nodes: RA.map(serializeNode)(r.typeFlowGraph.nodes),
-    edges: r.typeFlowGraph.edges,
-  },
+  typeFlowGraph: serializeGraph(r.typeFlowGraph),
 });
 
 const serializeAll = (reports: ReadonlyArray<AnalysisReport>) =>
-  reports.length === 1 ? serializeReport(reports[0]!) : RA.map(serializeReport)(reports);
+  match(reports)
+    .with([P.select()], serializeReport)
+    .otherwise(RA.map(serializeReport));
 
 const stringifyPretty = (data: unknown) => JSON.stringify(data, null, 2);
 

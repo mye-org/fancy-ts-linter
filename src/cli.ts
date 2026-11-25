@@ -3,6 +3,7 @@ import * as E from 'fp-ts/lib/Either.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { parseArgs } from 'node:util';
+import { match, P } from 'ts-pattern';
 import { analyzeFiles, type AnalysisReport, type AnalyzeOptions, type OutputFormat } from './index.js';
 import { formatJsonReports } from './reporters/jsonReporter.js';
 import { formatMarkdownReports } from './reporters/markdownReporter.js';
@@ -21,35 +22,49 @@ type ParsedCli = {
   readonly options: AnalyzeOptions;
 };
 
-const helpText = [
-  'Usage: fancy-ts-linter <file...> [options]',
-  '',
-  'Options:',
-  '  --tsconfig <path>       Path to tsconfig.json (auto-discovered if omitted)',
-  '  --format <json|md>      Output format: json (default) or md',
-  '  --max-flow-steps <n>    Step threshold for DDD decomposition hint (default: 10)',
-  '  --help                  Show this help message',
-].join('\n');
+type RawCliInput =
+  | { readonly _tag: 'HelpRequested' }
+  | {
+      readonly _tag: 'LintRequested';
+      readonly tsconfig: O.Option<string>;
+      readonly format: O.Option<string>;
+      readonly maxFlowSteps: O.Option<string>;
+      readonly positionals: ReadonlyArray<string>;
+    };
 
-const parseFormat = (raw: O.Option<string>): E.Either<string, OutputFormat> =>
-  O.match(
-    constant(E.right<string, OutputFormat>('json')),
-    (v: string) =>
-      v === 'json' || v === 'md'
-        ? E.right<string, OutputFormat>(v)
-        : E.left<string, OutputFormat>(`Invalid --format "${v}". Expected "json" or "md".`),
-  )(raw);
+type LintRequestedInput = Extract<RawCliInput, { readonly _tag: 'LintRequested' }>;
 
-const parseMaxSteps = (raw: O.Option<string>): E.Either<string, number> =>
-  O.match(
-    constant(E.right<string, number>(10)),
-    (v: string) => {
-      const n = Number(v);
-      return Number.isInteger(n) && n >= 2
-        ? E.right<string, number>(n)
-        : E.left<string, number>(`Invalid --max-flow-steps "${v}". Expected integer >= 2.`);
-    },
-  )(raw);
+const getHelpText = (_: ParsedCli) =>
+  [
+    'Usage: fancy-ts-linter <file...> [options]',
+    '',
+    'Options:',
+    '  --tsconfig <path>       Path to tsconfig.json (auto-discovered if omitted)',
+    '  --format <json|md>      Output format: json (default) or md',
+    '  --max-flow-steps <n>    Step threshold for DDD decomposition hint (default: 10)',
+    '  --help                  Show this help message',
+  ].join('\n');
+
+const isOutputFormat = (v: string) => v === 'json' || v === 'md';
+const invalidFormatMsg = (v: string) => `Invalid --format "${v}". Expected "json" or "md".`;
+const validateFormat = E.fromPredicate(isOutputFormat, invalidFormatMsg);
+
+const parseFormat = O.match(
+  constant(E.right<string, OutputFormat>('json')),
+  validateFormat,
+);
+
+const isValidMaxSteps = (n: number) => Number.isInteger(n) && n >= 2;
+const parseStepNumber = (v: string) =>
+  E.fromPredicate(
+    isValidMaxSteps,
+    constant(`Invalid --max-flow-steps "${v}". Expected integer >= 2.`),
+  )(Number(v));
+
+const parseMaxSteps = O.match(
+  constant(E.right<string, number>(10)),
+  parseStepNumber,
+);
 
 const invokeParseArgs = (argv: ReadonlyArray<string>) =>
   parseArgs({
@@ -63,67 +78,127 @@ const invokeParseArgs = (argv: ReadonlyArray<string>) =>
     },
   });
 
-const parseRawArgs = (argv: ReadonlyArray<string>) =>
-  E.tryCatch(
-    () => invokeParseArgs(argv),
-    (err) => (err instanceof Error ? err.message : String(err)),
-  );
+const getErrMessage = (err: Error) => err.message;
 
-const validateParsedArgs = (
-  parsed: ReturnType<typeof invokeParseArgs>,
-): E.Either<string, ParsedCli> => {
-  if (parsed.values.help === true) {
-    return E.right<string, ParsedCli>({
-      help: true,
-      filePaths: [],
-      options: { tsconfigPath: O.none, maxFlowSteps: 10, format: 'json' },
-    });
-  }
-  if (parsed.positionals.length === 0) {
-    return E.left<string, ParsedCli>('No input files provided. Run with --help for usage.');
-  }
-  return E.chain((format: OutputFormat) =>
-    E.map((maxFlowSteps: number): ParsedCli => ({
-      help: false,
-      filePaths: parsed.positionals,
-      options: {
-        tsconfigPath: O.fromNullable(parsed.values.tsconfig),
-        maxFlowSteps,
+const toErrorMessage = (err: unknown) =>
+  match(err)
+    .with(P.instanceOf(Error), getErrMessage)
+    .otherwise(String);
+
+const toLintRequested =
+  (positionals: ReadonlyArray<string>) =>
+  (values: ReturnType<typeof invokeParseArgs>['values']) => ({
+    _tag: 'LintRequested' as const,
+    tsconfig: O.fromNullable(values.tsconfig),
+    format: O.fromNullable(values.format),
+    maxFlowSteps: O.fromNullable(values['max-flow-steps']),
+    positionals,
+  });
+
+const toRawCliInput = (raw: ReturnType<typeof invokeParseArgs>) =>
+  match(raw)
+    .with({ values: { help: true } }, constant({ _tag: 'HelpRequested' } as const))
+    .otherwise(constant(toLintRequested(raw.positionals)(raw.values)));
+
+const parseRawArgs = (argv: ReadonlyArray<string>) =>
+  E.map(toRawCliInput)(E.tryCatch(flow(constant(argv), invokeParseArgs), toErrorMessage));
+
+const toHelpCli = (_: RawCliInput) => ({
+  help: true,
+  filePaths: RA.empty,
+  options: { tsconfigPath: O.none, maxFlowSteps: 10, format: 'json' as const },
+});
+
+const buildAnalyzeOptions =
+  (raw: { readonly tsconfigPath: O.Option<string>; readonly format: OutputFormat }) =>
+  (maxFlowSteps: number): AnalyzeOptions => ({
+    tsconfigPath: raw.tsconfigPath,
+    maxFlowSteps,
+    format: raw.format,
+  });
+
+const parseMaxStepsWithFormat =
+  (input: LintRequestedInput) =>
+  (format: OutputFormat) =>
+    E.map(
+      buildAnalyzeOptions({
+        tsconfigPath: input.tsconfig,
         format,
-      },
-    }))(parseMaxSteps(O.fromNullable(parsed.values['max-flow-steps']))),
-  )(parseFormat(O.fromNullable(parsed.values.format)));
-};
+      }),
+    )(parseMaxSteps(input.maxFlowSteps));
+
+const parseOptions = (input: LintRequestedInput) =>
+  E.chain(parseMaxStepsWithFormat(input))(parseFormat(input.format));
+
+const toParsedCli =
+  (filePaths: ReadonlyArray<string>) =>
+  (options: AnalyzeOptions): ParsedCli => ({
+    help: false,
+    filePaths,
+    options,
+  });
+
+const validatePositionals = (input: LintRequestedInput) =>
+  E.map(toParsedCli(input.positionals))(parseOptions(input));
+
+const validateParsedArgs = (input: RawCliInput) =>
+  match(input)
+    .with({ _tag: 'HelpRequested' }, flow(toHelpCli, E.right<string, ParsedCli>))
+    .with(
+      { _tag: 'LintRequested', positionals: [] },
+      constant(E.left<string, ParsedCli>('No input files provided. Run with --help for usage.')),
+    )
+    .with({ _tag: 'LintRequested' }, validatePositionals)
+    .exhaustive();
 
 const parseCliArgs = flow(
   parseRawArgs,
   E.chain(validateParsedArgs),
 );
 
-const formatOutput =
+const formatOutput = (format: OutputFormat) =>
+  match(format)
+    .with('md', constant(formatMarkdownReports))
+    .with('json', constant(formatJsonReports))
+    .exhaustive();
+
+const isReportPassed = (r: AnalysisReport) => r.passed;
+const allReportsPassed = RA.every(isReportPassed);
+
+const toErrorCliResult = (stderr: string) => ({
+  exitCode: 2,
+  stdout: '',
+  stderr,
+});
+
+const toSuccessCliResult =
   (format: OutputFormat) =>
-  (reports: ReadonlyArray<AnalysisReport>): string =>
-    format === 'md' ? formatMarkdownReports(reports) : formatJsonReports(reports);
+  (reports: ReadonlyArray<AnalysisReport>): CliResult => ({
+    exitCode: match(allReportsPassed(reports))
+      .with(true, constant(0))
+      .with(false, constant(1))
+      .exhaustive(),
+    stdout: formatOutput(format)(reports),
+    stderr: '',
+  });
 
-const executeParsedCli = (parsed: ParsedCli): CliResult => {
-  if (parsed.help) {
-    return { exitCode: 0, stdout: helpText, stderr: '' };
-  }
-  return E.match(
-    (err: string): CliResult => ({ exitCode: 2, stdout: '', stderr: err }),
-    (reports: ReadonlyArray<AnalysisReport>): CliResult => ({
-      exitCode: RA.every((r: AnalysisReport) => r.passed)(reports) ? 0 : 1,
-      stdout: formatOutput(parsed.options.format)(reports),
-      stderr: '',
-    }),
-  )(analyzeFiles({ filePaths: parsed.filePaths, options: parsed.options }));
-};
+const runAnalysisCli = (parsed: ParsedCli) =>
+  E.match(toErrorCliResult, toSuccessCliResult(parsed.options.format))(
+    analyzeFiles({ filePaths: parsed.filePaths, options: parsed.options }),
+  );
 
-const toCliResult = (parsedEither: E.Either<string, ParsedCli>): CliResult =>
-  E.match(
-    (err: string): CliResult => ({ exitCode: 2, stdout: '', stderr: err }),
-    executeParsedCli,
-  )(parsedEither);
+const toHelpCliResult = (parsed: ParsedCli) => ({
+  exitCode: 0,
+  stdout: getHelpText(parsed),
+  stderr: '',
+});
+
+const executeParsedCli = (parsed: ParsedCli) =>
+  match(parsed)
+    .with({ help: true }, toHelpCliResult)
+    .otherwise(runAnalysisCli);
+
+const toCliResult = E.match(toErrorCliResult, executeParsedCli);
 
 export const runCli = flow(
   parseCliArgs,

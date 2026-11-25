@@ -21,61 +21,55 @@ export type LoadedProgram = {
 
 export type LoadTargetProgram = (input: LoadProgramInput) => E.Either<string, LoadedProgram>;
 
-type RawTsConfigResult = {
-  readonly config?: unknown;
-  readonly error?: ts.Diagnostic;
-};
-
-const resolveAbsolutePath = (p: string) => path.resolve(p);
-
-const defaultCompilerOptions: ts.CompilerOptions = {
-  target: ts.ScriptTarget.ES2023,
-  module: ts.ModuleKind.NodeNext,
-  moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  strict: true,
-  noUncheckedIndexedAccess: true,
-  exactOptionalPropertyTypes: true,
-  skipLibCheck: true,
-  esModuleInterop: true,
-};
-
-const findConfigFromFile = (filePath: string): O.Option<string> =>
+const findConfigFromFile = (filePath: string) =>
   O.fromNullable(
     ts.findConfigFile(path.dirname(filePath), ts.sys.fileExists, 'tsconfig.json'),
   );
 
-const findConfigFromFirstFile = (filePaths: ReadonlyArray<string>): O.Option<string> =>
+const findConfigFromFirstFile = (filePaths: ReadonlyArray<string>) =>
   O.chain(findConfigFromFile)(RA.head(filePaths));
 
-const resolveConfigPath = (input: LoadProgramInput): O.Option<string> =>
+const resolveConfigPath = (input: LoadProgramInput) =>
   O.alt(constant(findConfigFromFirstFile(input.filePaths)))(
-    O.map(resolveAbsolutePath)(input.tsconfigPath),
+    O.map(path.resolve)(input.tsconfigPath),
   );
 
-const readRawTsConfig = (configPath: string): RawTsConfigResult =>
+const readRawTsConfig = (configPath: string) =>
   ts.readConfigFile(configPath, ts.sys.readFile);
 
-const hasNoConfigError = (res: RawTsConfigResult) => res.error === undefined;
+const formatTsConfigError = (configPath: string) => (d: ts.Diagnostic) =>
+  `Failed to read tsconfig at ${configPath}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`;
 
-const formatReadConfigError = (configPath: string) => (res: RawTsConfigResult) =>
-  `Failed to read tsconfig at ${configPath}: ${O.match(
-    constant('Unknown error'),
-    (d: ts.Diagnostic) => ts.flattenDiagnosticMessageText(d.messageText, '\n'),
-  )(O.fromNullable(res.error))}`;
+const toTsConfigEither =
+  (configPath: string) =>
+  (raw: ReturnType<typeof ts.readConfigFile>) =>
+    O.match(
+      constant(E.right<string, unknown>(raw.config)),
+      flow(formatTsConfigError(configPath), E.left),
+    )(O.fromNullable(raw.error));
 
-const parseConfigJson = (configPath: string) => (res: RawTsConfigResult): ts.ParsedCommandLine =>
-  ts.parseJsonConfigFileContent(res.config, ts.sys, path.dirname(configPath));
+const parseConfigJson = (configPath: string) => (config: unknown): ts.ParsedCommandLine =>
+  ts.parseJsonConfigFileContent(config, ts.sys, path.dirname(configPath));
 
-const readTsConfig = (configPath: string): E.Either<string, ts.ParsedCommandLine> =>
+const readTsConfig = (configPath: string) =>
   flow(
     readRawTsConfig,
-    E.fromPredicate(hasNoConfigError, formatReadConfigError(configPath)),
+    toTsConfigEither(configPath),
     E.map(parseConfigJson(configPath)),
   )(configPath);
 
-const makeEmptyParsedConfig = (filePaths: ReadonlyArray<string>): E.Either<string, ts.ParsedCommandLine> =>
-  E.right({
-    options: defaultCompilerOptions,
+const makeEmptyParsedConfig = (filePaths: ReadonlyArray<string>) =>
+  E.right<string, ts.ParsedCommandLine>({
+    options: {
+      target: ts.ScriptTarget.ES2023,
+      module: ts.ModuleKind.NodeNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      strict: true,
+      noUncheckedIndexedAccess: true,
+      exactOptionalPropertyTypes: true,
+      skipLibCheck: true,
+      esModuleInterop: true,
+    },
     fileNames: [...filePaths],
     errors: [],
   });
@@ -88,7 +82,7 @@ const resolveParsedConfig = (input: LoadProgramInput) =>
 
 const dedupePaths = RA.uniq(S.Eq);
 
-const toLoadedProgram = (program: ts.Program): LoadedProgram => ({
+const toLoadedProgram = (program: ts.Program) => ({
   program,
   checker: program.getTypeChecker(),
   getTscErrors: collectTscErrorsForFile(program),
@@ -102,12 +96,16 @@ const createProgramFromOptions =
       options,
     });
 
+const mergeTargetPaths =
+  (parsedFileNames: ReadonlyArray<string>) => (absTargets: ReadonlyArray<string>) =>
+    dedupePaths([...parsedFileNames, ...absTargets]);
+
 const buildProgramWith =
   (filePaths: ReadonlyArray<string>) =>
   (parsed: ts.ParsedCommandLine): LoadedProgram =>
     flow(
-      RA.map(resolveAbsolutePath),
-      (absTargets) => dedupePaths([...parsed.fileNames, ...absTargets]),
+      RA.map(path.resolve),
+      mergeTargetPaths(parsed.fileNames),
       createProgramFromOptions(parsed.options),
       toLoadedProgram,
     )(filePaths);
@@ -123,20 +121,24 @@ const lineCharFromPositions = ({
   readonly sf: ts.SourceFile;
   readonly startPos: number;
   readonly endPos: number;
-}): SourceLocation => ({
+}) => ({
   line: sf.getLineAndCharacterOfPosition(startPos).line + 1,
   column: sf.getLineAndCharacterOfPosition(startPos).character + 1,
   endLine: sf.getLineAndCharacterOfPosition(endPos).line + 1,
   endColumn: sf.getLineAndCharacterOfPosition(endPos).character + 1,
 });
 
+const toDiagLocationAt =
+  ({ sf, diag }: { readonly sf: ts.SourceFile; readonly diag: ts.Diagnostic }) =>
+  (start: number) =>
+    lineCharFromPositions({ sf, startPos: start, endPos: start + getDiagLength(diag) });
+
 const toDiagnosticLocation =
   (sf: ts.SourceFile) =>
   (diag: ts.Diagnostic): SourceLocation =>
     O.match(
       constant({ line: 1, column: 1, endLine: 1, endColumn: 1 }),
-      (start: number) =>
-        lineCharFromPositions({ sf, startPos: start, endPos: start + getDiagLength(diag) }),
+      toDiagLocationAt({ sf, diag }),
     )(O.fromNullable(diag.start));
 
 const sliceSnippet =
@@ -174,13 +176,13 @@ const collectTscErrorsForFile =
       ...program.getSemanticDiagnostics(sf),
     ]);
 
-const ensureNonEmptyTargets = (input: LoadProgramInput): E.Either<string, LoadProgramInput> =>
+const ensureNonEmptyTargets = (input: LoadProgramInput) =>
   B.match(
-    constant(E.right(input)),
-    constant(E.left('No target TypeScript files provided.')),
+    constant(E.right<string, LoadProgramInput>(input)),
+    constant(E.left<string, LoadProgramInput>('No target TypeScript files provided.')),
   )(RA.isEmpty(input.filePaths));
 
-const loadFromValidInput = (input: LoadProgramInput): E.Either<string, LoadedProgram> =>
+const loadFromValidInput = (input: LoadProgramInput) =>
   E.map(buildProgramWith(input.filePaths))(resolveParsedConfig(input));
 
 export const loadTargetProgram = flow(
