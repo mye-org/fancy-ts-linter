@@ -58,7 +58,7 @@ const makeRecursiveHint = (b: BindingInfo) => {
     {
       hintId: isoHintId.wrap(`declarative-recursion-${b.name}`),
       category: 'declarative-combinator',
-      priority: 'medium',
+      priority: 'high',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
       evidence: isoHintEvidence.wrap(`\`${b.name}\` uses explicit self-recursion.`),
       suggestion: isoHintSuggestion.wrap('Prefer declarative `fp-ts/ReadonlyArray` combinators (`RA.unfold`, `RA.traverse`, `RA.foldMap`, `Monoid.concatAll`) over manual recursion.'),

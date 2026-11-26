@@ -96,4 +96,26 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
     const oneOffReport = analyzeOne('test/fixtures/feedback/pureConstBlockAndDirectExport.ts');
     expect(oneOffReport.hints.filter((h) => h.category === 'optic')).toEqual([]);
   });
+
+  it('orders hints by priority then refactoring category, and avoids duplicate arity-strategy hints on unary-arity-only errors', () => {
+    const flagReport = analyzeOne('test/fixtures/violations/flagExplosion.ts');
+    const weights: Record<'high' | 'medium' | 'low', number> = { high: 0, medium: 1, low: 2 };
+    const priorities = flagReport.hints.map((h) => weights[h.priority]);
+    expect(priorities).toEqual([...priorities].sort((a, b) => a - b));
+
+    const highCategories = flagReport.hints
+      .filter((h) => h.priority === 'high')
+      .map((h) => h.category);
+    const firstNewtypeIdx = highCategories.indexOf('newtype-brand');
+    const lastAdtIdx = highCategories.lastIndexOf('adt-over-flags');
+    if (firstNewtypeIdx !== -1 && lastAdtIdx !== -1) {
+      expect(lastAdtIdx).toBeLessThan(firstNewtypeIdx);
+    }
+
+    const imperativeReport = analyzeOne('test/fixtures/violations/imperativeOrder.ts');
+    const hasUnaryError = imperativeReport.errors.some((e) => String(e.ruleId) === 'unary-arity-only');
+    if (hasUnaryError) {
+      expect(imperativeReport.hints.filter((h) => h.category === 'arity-strategy')).toEqual([]);
+    }
+  });
 });

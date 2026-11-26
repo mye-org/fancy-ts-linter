@@ -34,11 +34,6 @@ type FlowLengthHintInput = {
   readonly maxFlowSteps: number;
 };
 
-type ArityHintInput = {
-  readonly ctx: RuleContext;
-  readonly n: ts.ArrowFunction;
-};
-
 type CurryHintInput = {
   readonly ctx: RuleContext;
   readonly n: ts.ArrowFunction;
@@ -120,7 +115,7 @@ const makePureCoreIoShellHint = (b: BindingInfo) => {
     {
       hintId: isoHintId.wrap('ddd-pure-core-io-shell'),
       category: 'ddd-decomposition',
-      priority: 'medium',
+      priority: 'high',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
       evidence: isoHintEvidence.wrap(`\`${b.name}\` orchestrates both pure domain logic and async I/O (\`TaskEither\`/\`ReaderTaskEither\`) in one flat pipeline.`),
       suggestion: isoHintSuggestion.wrap('Group pure domain steps into a synchronous sub-flow (`Either` / `Option`) and keep async I/O steps in a separate shell sub-flow.'),
@@ -149,61 +144,8 @@ const checkMixedPureAndIo = (ctx: RuleContext) => {
   )(hasPure && hasAsyncEffect);
 };
 
-const isFunctionLikeParam = (checker: ts.TypeChecker) => (p: ts.ParameterDeclaration) =>
-  checker.getTypeAtLocation(p).getCallSignatures().length > 0;
-
-const isFnOrConfigParam = (ctx: RuleContext) => (p: ts.ParameterDeclaration) =>
-  isFunctionLikeParam(ctx.checker)(p) ||
-  /config|env|deps|predicate|fn|rate|factor|threshold/i.test(p.name.getText(ctx.sourceFile));
-
 const getNodeLoc = (ctx: RuleContext) =>
   ctx.inspector.getLocation(ctx.sourceFile);
-
-const getParamCount = (n: ts.ArrowFunction | ts.FunctionExpression) => n.parameters.length;
-
-const makeArityStrategyHint = ({ ctx, n }: ArityHintInput) => {
-  const hasFnOrConfig = RA.some(isFnOrConfigParam(ctx))(n.parameters);
-  const loc = getNodeLoc(ctx)(n);
-  const suggestion = B.match(
-    constant(
-      'Bundle cohesive peer parameters into a single named **Domain Record** type (`export type Input = { ... }`).',
-    ),
-    constant(
-      'Keep currying to **at most 2–3 levels** (`(configOrContext) => (input: InputRecord) => result`) and only when outer args are partially applied; otherwise use a single named **Domain/Input Record**.',
-    ),
-  )(hasFnOrConfig);
-
-  const hints: ReadonlyArray<AgentHint> = [
-    {
-      hintId: isoHintId.wrap(`arity-strategy-${loc.line}-${loc.column}`),
-      category: 'arity-strategy',
-      priority: 'high',
-      location: { line: loc.line, column: loc.column },
-      evidence: isoHintEvidence.wrap(`Function at line ${loc.line} has ${getParamCount(n)} parameters.`),
-      suggestion: isoHintSuggestion.wrap(suggestion),
-      suggestedSignature: O.none,
-      researchQuestions: [
-        'Are these parameters configuration/behavior reused across calls (2-step curry) or peer fields of one call (Domain Record)?',
-      ],
-    },
-  ];
-  return hints;
-};
-
-const checkArrowMultiParam = (ctx: RuleContext) => (n: ts.ArrowFunction) =>
-  B.match(RA.zero<AgentHint>, constant(makeArityStrategyHint({ ctx, n })))(
-    getParamCount(n) > 1,
-  );
-
-const checkNodeMultiParam = (ctx: RuleContext) => (n: ts.Node) =>
-  O.match(RA.zero<AgentHint>, checkArrowMultiParam(ctx))(
-    O.fromPredicate(ts.isArrowFunction)(n),
-  );
-
-const checkMultiParamArityStrategy = (ctx: RuleContext) => {
-  const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
-  return RA.chain(checkNodeMultiParam(ctx))(nodes);
-};
 
 const pairSame = <A>(a: A) => [a, a] as const;
 
@@ -269,6 +211,5 @@ const checkDeepCurryChain = (ctx: RuleContext) => {
 export const detectDddAndArityHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...checkLongFlows(ctx),
   ...checkMixedPureAndIo(ctx),
-  ...checkMultiParamArityStrategy(ctx),
   ...checkDeepCurryChain(ctx),
 ]) satisfies HintRunner;

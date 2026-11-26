@@ -84,7 +84,7 @@ const buildReaderThreadingHint =
         {
           hintId: isoHintId.wrap('monad-reader-threading'),
           category: 'monad',
-          priority: 'medium',
+          priority: 'high',
           location: getBindingLocation(first.b),
           evidence: isoHintEvidence.wrap(`Dependency/config type (${first.depType}) is threaded across ${candidates.length} curried helpers (${RA.map(getCandidateName)(candidates).join(', ')}).`),
           suggestion: isoHintSuggestion.wrap('Lift shared dependency threading into `fp-ts/Reader` or `ReaderTaskEither` (`RTE.ask` / `RTE.asks`).'),
@@ -123,7 +123,7 @@ const checkBindingArrayOfEffects = (ctx: RuleContext) => (b: BindingInfo) => {
       {
         hintId: isoHintId.wrap(`monad-traverse-${b.name}`),
         category: 'monad',
-        priority: 'medium',
+        priority: 'high',
         location: getBindingLocation(b),
         evidence: isoHintEvidence.wrap(`\`${b.name}\` produces an array of effects (${b.signature}).`),
         suggestion: isoHintSuggestion.wrap('Use `RA.traverse(Effect.Applicative)` or `RA.sequence` to invert `ReadonlyArray<Effect<A>>` into `Effect<ReadonlyArray<A>>`.'),
