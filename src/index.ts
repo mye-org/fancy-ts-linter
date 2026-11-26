@@ -13,8 +13,10 @@ import { loadTargetProgram, type LoadedProgram } from './compiler/programLoader.
 import { createTypeInspector } from './compiler/typeUtils.js';
 import { runAllCrossFileHints } from './crossFile/index.js';
 import { expandTargetPaths } from './graph/fileDiscovery.js';
+import { isUnitTestFile } from './graph/isUnitTestFile.js';
 import { buildProjectDag } from './graph/projectDag.js';
 import { runAllHints } from './hints/index.js';
+import { detectTestQualityHints } from './hints/testQualityHints.js';
 import { extractModuleIR } from './ir/moduleGraph.js';
 import {
   buildProjectAnalysisReport,
@@ -49,6 +51,7 @@ import {
   type TypeInspector,
 } from './model/report.js';
 import { runAllRules } from './rules/index.js';
+import { checkTestHygieneRules } from './rules/testHygieneRules.js';
 
 export type {
   AgentHint,
@@ -166,12 +169,21 @@ const analyzeSourceFile = ({
     options: toAnalyzeOptions(options),
     tscErrors: loaded.getTscErrors(sf),
   };
+  const isTest = isUnitTestFile(sf.fileName);
+  const errors = B.match(
+    () => runAllRules(ctx),
+    () => checkTestHygieneRules(ctx),
+  )(isTest);
+  const hints = B.match(
+    () => runAllHints(ctx),
+    () => detectTestQualityHints(ctx),
+  )(isTest);
   return {
     abs: path.resolve(sf.fileName),
     report: buildAnalysisReport({
       filePath: sf.fileName,
-      errors: runAllRules(ctx),
-      hints: runAllHints(ctx),
+      errors,
+      hints,
       ir,
     }),
     ir,

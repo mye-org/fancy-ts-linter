@@ -36,7 +36,8 @@ export type ErrorCategory =
   | 'branching'
   | 'monad'
   | 'optic'
-  | 'type-safety';
+  | 'type-safety'
+  | 'test-hygiene';
 
 export type HintCategory =
   | 'adt-over-flags'
@@ -47,7 +48,10 @@ export type HintCategory =
   | 'monad'
   | 'optic'
   | 'ddd-decomposition'
-  | 'arity-strategy';
+  | 'arity-strategy'
+  | 'test-coverage'
+  | 'test-design'
+  | 'test-code-smell';
 
 export type HintPriority = 'high' | 'medium' | 'low';
 
