@@ -2,7 +2,13 @@ import * as B from 'fp-ts/lib/boolean.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion, SymbolName } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
+const isoSymbolName = iso<SymbolName>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -43,7 +49,7 @@ const hasBranchingText = (sf: ts.SourceFile) => (he: ts.Expression) =>
 
 const isBranchingHandlerBinding =
   (input: { readonly sf: ts.SourceFile; readonly hName: string }) => (hb: BindingInfo) =>
-    hb.name === input.hName &&
+    isoSymbolName.unwrap(hb.name) === input.hName &&
     (hb.kind === 'adt-matcher' || O.exists(hasBranchingText(input.sf))(hb.initializer));
 
 const hasHandlerBranching =
@@ -66,21 +72,22 @@ const buildPatternDepthHint = ({
     () => 'medium',
     () => 'high',
   )(hasNestedBranchInHandlers);
-  const evidence = B.match(
-    () =>
-      `\`${b.name}\` uses flat \`match\` cases without structural patterns (\`P.select\`, \`P.when\`, \`P.union\`).`,
-    () => `\`${b.name}\` uses shallow \`ts-pattern\` tag matching whose handlers branch again.`,
-  )(hasNestedBranchInHandlers);
+  const evidence = isoHintEvidence.wrap(
+    B.match(
+      () =>
+        `\`${b.name}\` uses flat \`match\` cases without structural patterns (\`P.select\`, \`P.when\`, \`P.union\`).`,
+      () => `\`${b.name}\` uses shallow \`ts-pattern\` tag matching whose handlers branch again.`,
+    )(hasNestedBranchInHandlers),
+  );
 
   return [
     {
-      hintId: `pattern-depth-${b.name}`,
+      hintId: isoHintId.wrap(`pattern-depth-${b.name}`),
       category: 'pattern-matching-depth' as const,
       priority,
       location: { line: b.location.line, column: b.location.column },
       evidence,
-      suggestion:
-        'Leverage `ts-pattern` deep structural matching: match nested fields directly with `P.when(pred)`, extract values with `P.select()`, or combine states with `match([a, b])`.',
+      suggestion: isoHintSuggestion.wrap('Leverage `ts-pattern` deep structural matching: match nested fields directly with `P.when(pred)`, extract values with `P.select()`, or combine states with `match([a, b])`.'),
       suggestedSignature: O.none,
       researchQuestions: [
         `Can secondary checks inside \`${handlerNames.join(', ')}\` be expressed directly in \`.with({ _tag: ..., field: P.when(...) }, ...)\`?`,

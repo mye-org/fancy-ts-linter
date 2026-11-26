@@ -5,7 +5,25 @@ import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, FieldInfo, RuleContext, TypeDeclInfo } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type {
+  AgentHint,
+  BindingInfo,
+  FieldInfo,
+  FieldName,
+  SymbolName,
+  RuleContext,
+  TypeDeclInfo,
+  HintEvidence,
+  HintId,
+  HintSuggestion,
+} from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
+const isoFieldName = iso<FieldName>();
+const isoSymbolName = iso<SymbolName>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -30,13 +48,13 @@ const typeColLens = Lens.fromPath<TypeDeclInfo>()(['location', 'column']);
 const bindingLineLens = Lens.fromPath<BindingInfo>()(['location', 'line']);
 const bindingColLens = Lens.fromPath<BindingInfo>()(['location', 'column']);
 
-const isBooleanField = (f: FieldInfo) => f.isBoolean;
-const isOptOrNullField = (f: FieldInfo) => f.isOptional || f.isNullable;
-const getFieldName = (f: FieldInfo) => f.name;
+const isBooleanField = (f: FieldInfo) => f.kind === 'boolean';
+const isOptOrNullField = (f: FieldInfo) => f.nullability !== 'required';
+const getFieldName = (f: FieldInfo) => isoFieldName.unwrap(f.name);
 
 const isLooseStatusField = (f: FieldInfo) => {
   const flagFieldNames: ReadonlyArray<string> = ['status', 'state', 'mode', 'kind', 'type'];
-  return f.isRawString && RA.elem(S.Eq)(f.name)(flagFieldNames);
+  return f.kind === 'raw-string' && RA.elem(S.Eq)(getFieldName(f))(flagFieldNames);
 };
 
 const headFieldName = (fallback: string) =>
@@ -45,12 +63,12 @@ const headFieldName = (fallback: string) =>
 const makeMultiBoolHints = ({ td, boolFields }: MultiBoolInput) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `adt-multi-bool-${td.name}`,
+      hintId: isoHintId.wrap(`adt-multi-bool-${td.name}`),
       category: 'adt-over-flags',
       priority: 'high',
       location: { line: typeLineLens.get(td), column: typeColLens.get(td) },
-      evidence: `Type \`${td.name}\` has ${boolFields.length} boolean flags (${RA.map(getFieldName)(boolFields).join(', ')}), creating ${2 ** boolFields.length} possible flag combinations.`,
-      suggestion: `Replace boolean flags on \`${td.name}\` with a Discriminated Union Sum Type (\`_tag\`) so illegal state combinations are unrepresentable.`,
+      evidence: isoHintEvidence.wrap(`Type \`${td.name}\` has ${boolFields.length} boolean flags (${RA.map(getFieldName)(boolFields).join(', ')}), creating ${2 ** boolFields.length} possible flag combinations.`),
+      suggestion: isoHintSuggestion.wrap(`Replace boolean flags on \`${td.name}\` with a Discriminated Union Sum Type (\`_tag\`) so illegal state combinations are unrepresentable.`),
       suggestedSignature: O.some(
         `export type ${td.name} = { readonly _tag: 'StateA'; ... } | { readonly _tag: 'StateB'; ... }`,
       ),
@@ -73,12 +91,12 @@ const makeBoolPlusOptHints = ({
   const firstOptName = headFieldName('field')(optOrNullFields);
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `adt-bool-opt-${td.name}`,
+      hintId: isoHintId.wrap(`adt-bool-opt-${td.name}`),
       category: 'adt-over-flags',
       priority: 'high',
       location: { line: typeLineLens.get(td), column: typeColLens.get(td) },
-      evidence: `Type \`${td.name}\` pairs boolean flag \`${firstBoolName}\` with optional/nullable field(s) (${RA.map(getFieldName)(optOrNullFields).join(', ')}).`,
-      suggestion: `Split \`${td.name}\` into a Discriminated Union ADT where only the active variant carries the associated data.`,
+      evidence: isoHintEvidence.wrap(`Type \`${td.name}\` pairs boolean flag \`${firstBoolName}\` with optional/nullable field(s) (${RA.map(getFieldName)(optOrNullFields).join(', ')}).`),
+      suggestion: isoHintSuggestion.wrap(`Split \`${td.name}\` into a Discriminated Union ADT where only the active variant carries the associated data.`),
       suggestedSignature: O.none,
       researchQuestions: [
         `Is \`${firstOptName}\` only present when \`${firstBoolOrFlag}\` is true?`,
@@ -91,12 +109,12 @@ const makeBoolPlusOptHints = ({
 const makeLooseStatusHint =
   (td: TypeDeclInfo) =>
   (f: FieldInfo): AgentHint => ({
-    hintId: `adt-loose-status-${td.name}-${f.name}`,
+    hintId: isoHintId.wrap(`adt-loose-status-${td.name}-${f.name}`),
     category: 'adt-over-flags',
     priority: 'medium',
     location: { line: typeLineLens.get(td), column: typeColLens.get(td) },
-    evidence: `Field \`${td.name}.${f.name}\` is typed as raw \`string\` rather than a closed union or ADT.`,
-    suggestion: `Replace raw \`${f.name}: string\` with a closed discriminated union or string-literal union.`,
+    evidence: isoHintEvidence.wrap(`Field \`${td.name}.${f.name}\` is typed as raw \`string\` rather than a closed union or ADT.`),
+    suggestion: isoHintSuggestion.wrap(`Replace raw \`${f.name}: string\` with a closed discriminated union or string-literal union.`),
     suggestedSignature: O.none,
     researchQuestions: [`What is the closed set of valid \`${f.name}\` states in the domain?`],
   });
@@ -137,12 +155,12 @@ const sigHasBooleanParam = (input: DeclCheckerInput) => (sig: ts.Signature) =>
 const makeBoolParamHint = (b: BindingInfo) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `adt-bool-param-${b.name}`,
+      hintId: isoHintId.wrap(`adt-bool-param-${b.name}`),
       category: 'adt-over-flags',
       priority: 'high',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `Function \`${b.name}\` accepts a \`boolean\` flag parameter (${b.signature}).`,
-      suggestion: `Replace the boolean mode/flag parameter with an explicit 2-variant ADT or separate domain-named functions.`,
+      evidence: isoHintEvidence.wrap(`Function \`${b.name}\` accepts a \`boolean\` flag parameter (${b.signature}).`),
+      suggestion: isoHintSuggestion.wrap(`Replace the boolean mode/flag parameter with an explicit 2-variant ADT or separate domain-named functions.`),
       suggestedSignature: O.none,
       researchQuestions: [
         `What two distinct domain concepts does the \`boolean\` parameter in \`${b.name}\` represent?`,
@@ -163,7 +181,7 @@ const checkNonPredicateBinding = (ctx: RuleContext) => (b: BindingInfo) => {
 
 const checkBindingBooleanParam = (ctx: RuleContext) => (b: BindingInfo) =>
   B.match(constant(checkNonPredicateBinding(ctx)(b)), RA.zero<AgentHint>)(
-    isPredicateName(b.name),
+    isPredicateName(isoSymbolName.unwrap(b.name)),
   );
 
 const checkBooleanParamBindings = (ctx: RuleContext) =>

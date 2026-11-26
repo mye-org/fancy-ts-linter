@@ -4,7 +4,12 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -66,13 +71,12 @@ const collectAllNodes = (sf: ts.SourceFile) => (root: ts.Node) =>
 const makeFlowLengthHint = ({ b, steps, maxFlowSteps }: FlowLengthHintInput) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `ddd-flow-length-${b.name}`,
+      hintId: isoHintId.wrap(`ddd-flow-length-${b.name}`),
       category: 'ddd-decomposition',
       priority: 'high',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `Pipeline \`${b.name}\` has ${steps} steps (threshold: ${maxFlowSteps}).`,
-      suggestion:
-        'Decompose this long `flow(...)` into 2–4 domain-meaningful sub-flows (`const validateOrder = flow(...)`, `const applyPricing = flow(...)`, `export const main = flow(validateOrder, applyPricing)`).',
+      evidence: isoHintEvidence.wrap(`Pipeline \`${b.name}\` has ${steps} steps (threshold: ${maxFlowSteps}).`),
+      suggestion: isoHintSuggestion.wrap('Decompose this long `flow(...)` into 2–4 domain-meaningful sub-flows (`const validateOrder = flow(...)`, `const applyPricing = flow(...)`, `export const main = flow(validateOrder, applyPricing)`).'),
       suggestedSignature: O.none,
       researchQuestions: [
         'Which contiguous steps form a cohesive DDD phase (Validation, Domain Transform, Persistence/I/O)?',
@@ -114,13 +118,12 @@ const gte6 = (n: number) => n >= 6;
 const makePureCoreIoShellHint = (b: BindingInfo) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: 'ddd-pure-core-io-shell',
+      hintId: isoHintId.wrap('ddd-pure-core-io-shell'),
       category: 'ddd-decomposition',
       priority: 'medium',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `\`${b.name}\` orchestrates both pure domain logic and async I/O (\`TaskEither\`/\`ReaderTaskEither\`) in one flat pipeline.`,
-      suggestion:
-        'Group pure domain steps into a synchronous sub-flow (`Either` / `Option`) and keep async I/O steps in a separate shell sub-flow.',
+      evidence: isoHintEvidence.wrap(`\`${b.name}\` orchestrates both pure domain logic and async I/O (\`TaskEither\`/\`ReaderTaskEither\`) in one flat pipeline.`),
+      suggestion: isoHintSuggestion.wrap('Group pure domain steps into a synchronous sub-flow (`Either` / `Option`) and keep async I/O steps in a separate shell sub-flow.'),
       suggestedSignature: O.none,
       researchQuestions: [
         'Can all pure business rules be tested independently as a pure `Either` sub-flow?',
@@ -153,9 +156,14 @@ const isFnOrConfigParam = (ctx: RuleContext) => (p: ts.ParameterDeclaration) =>
   isFunctionLikeParam(ctx.checker)(p) ||
   /config|env|deps|predicate|fn|rate|factor|threshold/i.test(p.name.getText(ctx.sourceFile));
 
+const getNodeLoc = (ctx: RuleContext) =>
+  ctx.inspector.getLocation(ctx.sourceFile);
+
+const getParamCount = (n: ts.ArrowFunction | ts.FunctionExpression) => n.parameters.length;
+
 const makeArityStrategyHint = ({ ctx, n }: ArityHintInput) => {
   const hasFnOrConfig = RA.some(isFnOrConfigParam(ctx))(n.parameters);
-  const loc = ctx.inspector.getLocation(ctx.sourceFile)(n);
+  const loc = getNodeLoc(ctx)(n);
   const suggestion = B.match(
     constant(
       'Bundle cohesive peer parameters into a single named **Domain Record** type (`export type Input = { ... }`).',
@@ -167,12 +175,12 @@ const makeArityStrategyHint = ({ ctx, n }: ArityHintInput) => {
 
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `arity-strategy-${loc.line}-${loc.column}`,
+      hintId: isoHintId.wrap(`arity-strategy-${loc.line}-${loc.column}`),
       category: 'arity-strategy',
       priority: 'high',
       location: { line: loc.line, column: loc.column },
-      evidence: `Function at line ${loc.line} has ${n.parameters.length} parameters.`,
-      suggestion,
+      evidence: isoHintEvidence.wrap(`Function at line ${loc.line} has ${getParamCount(n)} parameters.`),
+      suggestion: isoHintSuggestion.wrap(suggestion),
       suggestedSignature: O.none,
       researchQuestions: [
         'Are these parameters configuration/behavior reused across calls (2-step curry) or peer fields of one call (Domain Record)?',
@@ -184,7 +192,7 @@ const makeArityStrategyHint = ({ ctx, n }: ArityHintInput) => {
 
 const checkArrowMultiParam = (ctx: RuleContext) => (n: ts.ArrowFunction) =>
   B.match(RA.zero<AgentHint>, constant(makeArityStrategyHint({ ctx, n })))(
-    n.parameters.length > 1,
+    getParamCount(n) > 1,
   );
 
 const checkNodeMultiParam = (ctx: RuleContext) => (n: ts.Node) =>
@@ -224,17 +232,16 @@ const isCurriedRoot = (n: ts.Node): n is ts.ArrowFunction =>
   ts.isArrowFunction(n) && !(n.parent !== undefined && ts.isArrowFunction(n.parent));
 
 const makeDeepCurryHint = ({ ctx, n, depth }: CurryHintInput) => {
-  const loc = ctx.inspector.getLocation(ctx.sourceFile)(n);
+  const loc = getNodeLoc(ctx)(n);
   const priority = B.match(constant('medium' as const), constant('high' as const))(depth >= 4);
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `arity-curry-depth-${loc.line}-${loc.column}`,
+      hintId: isoHintId.wrap(`arity-curry-depth-${loc.line}-${loc.column}`),
       category: 'arity-strategy',
       priority,
       location: { line: loc.line, column: loc.column },
-      evidence: `Curried function at line ${loc.line} has ${depth} nested parameter levels.`,
-      suggestion:
-        'Avoid long curried chains (positional ambiguity, closure & type-checking overhead). Collapse parameters into a single named input object (`(input: FnInput) => ...`), or use a 2-step curry (`(ctx) => (input: FnInput) => ...`) only if the outer argument is partially applied.',
+      evidence: isoHintEvidence.wrap(`Curried function at line ${loc.line} has ${depth} nested parameter levels.`),
+      suggestion: isoHintSuggestion.wrap('Avoid long curried chains (positional ambiguity, closure & type-checking overhead). Collapse parameters into a single named input object (`(input: FnInput) => ...`), or use a 2-step curry (`(ctx) => (input: FnInput) => ...`) only if the outer argument is partially applied.'),
       suggestedSignature: O.none,
       researchQuestions: [
         'Are all arguments supplied at once at call sites (use a single input record), or is the outer argument genuinely reused via partial application (2-step curry)?',

@@ -5,15 +5,22 @@ import { sort as raSort } from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import { constant, flow } from 'fp-ts/lib/function.js';
 import * as N from 'fp-ts/lib/number.js';
+import { iso } from 'newtype-ts';
 import type * as ts from 'typescript';
 import type {
   BuiltProjectDag,
   CrossFileHint,
+  ModuleCount,
+  OccurrenceCount,
   ResolvedAnalyzeOptions,
 } from '../model/projectReport.js';
-import type { HintPriority, TypeInspector } from '../model/report.js';
+import type { HintId, HintPriority, TypeInspector } from '../model/report.js';
 import { runDagSmellDetectors } from './dagSmells.js';
 import { runPatternDiscoveryDetectors } from './patternDiscovery.js';
+
+const isoHintId = iso<HintId>();
+const isoModuleCount = iso<ModuleCount>();
+const isoOccurrenceCount = iso<OccurrenceCount>();
 
 export type RunAllCrossFileHintsInput = {
   readonly dag: BuiltProjectDag;
@@ -33,7 +40,7 @@ const priorityWeight = (p: HintPriority) => {
 
 const getHintPriority = (h: CrossFileHint) => h.priority;
 const getHintCategory = (h: CrossFileHint) => h.category;
-const getHintId = (h: CrossFileHint) => h.hintId;
+const getHintId = (h: CrossFileHint) => isoHintId.unwrap(h.hintId);
 
 const ordByPriority = Ord.contramap(flow(getHintPriority, priorityWeight))(N.Ord);
 const ordByCategory = Ord.contramap(getHintCategory)(S.Ord);
@@ -56,13 +63,15 @@ const collectAllHints = ({
   sortHints([
     ...runDagSmellDetectors({
       dag,
-      options: { minDirModules: options.minDirModules },
+      options: { minDirModules: isoModuleCount.unwrap(options.minDirModules) },
     }),
     ...runPatternDiscoveryDetectors({
       dag,
       checker,
       inspector,
-      options: { minPatternOccurrences: options.minPatternOccurrences },
+      options: {
+        minPatternOccurrences: isoOccurrenceCount.unwrap(options.minPatternOccurrences),
+      },
     }),
   ]);
 

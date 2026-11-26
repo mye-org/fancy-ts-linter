@@ -4,6 +4,8 @@ import * as M from 'fp-ts/lib/Monoid.js';
 import * as NEA from 'fp-ts/lib/NonEmptyArray.js';
 import * as N from 'fp-ts/lib/number.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as Ord from 'fp-ts/lib/Ord.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as RR from 'fp-ts/lib/ReadonlyRecord.js';
@@ -13,20 +15,42 @@ import * as ts from 'typescript';
 import { extractModuleIR } from '../ir/moduleGraph.js';
 import type {
   BuiltProjectDag,
+  ClusterCount,
+  CohesionScore,
+  CycleCount,
+  DependencyCount,
+  DepthCount,
   DirectoryCluster,
   DirectoryCohesionMetric,
+  DirectoryCount,
+  DirectoryPath,
+  EdgeCount,
+  JaccardScore,
+  LayerIndex,
+  ModuleCount,
+  ModuleKind,
+  ModuleRole,
+  ModuleScope,
   ProjectDagSummary,
   ProjectEdge,
   ProjectModuleNode,
+  RelativePath,
   ResolvedModuleData,
 } from '../model/projectReport.js';
-import type { BindingInfo, ModuleIR, TypeInspector } from '../model/report.js';
+import type { BindingInfo, ModuleIR, SymbolName, TypeInspector, TypeSignature } from '../model/report.js';
+const isoSymbolName = iso<SymbolName>();
+const isoTypeSignature = iso<TypeSignature>();
 import { computeCommonRootDir } from './computeCommonRootDir.js';
 import { isDefaultTestOrFixtureFile } from './isDefaultTestOrFixtureFile.js';
 import { isTsSourceFile } from './isTsSourceFile.js';
 import { matchesExcludePatterns } from './matchesExcludePatterns.js';
 import { toRelativeDirectory } from './toRelativeDirectory.js';
-import { toRelativePosixPath } from './toRelativePosixPath.js';
+import { iso } from 'newtype-ts';
+import {
+  toRelativePosixPath,
+  type FilePath,
+  type RootDir,
+} from './toRelativePosixPath.js';
 
 export type BuildProjectDagInput = {
   readonly program: ts.Program;
@@ -154,11 +178,11 @@ const isRelativeOrAbsoluteSpecifier = (specifier: string) =>
 const isTypeReference = (t: ts.Type): t is ts.TypeReference =>
   'target' in t && 'typeArguments' in t;
 
-const isUnionOrIntersection = (t: ts.Type): t is ts.UnionOrIntersectionType =>
+const isUnionOrIntersectionType = (t: ts.Type): t is ts.UnionOrIntersectionType =>
   t.isUnionOrIntersection();
 
 const getFirstDeclaration = (sym: ts.Symbol) =>
-  O.chain(RA.head)(O.fromNullable(sym.declarations));
+  O.chain(RA.head)(liftNullable(sym.declarations));
 
 const getSourceFileName = (decl: ts.Declaration) => decl.getSourceFile().fileName;
 
@@ -227,7 +251,7 @@ const collectDirectSymbolNames = (type: ts.Type) =>
       O.match(
         () => [] satisfies ReadonlyArray<string>,
         getSymbolDomainName,
-      )(O.match(() => O.fromNullable(type.getSymbol()), O.some<ts.Symbol>)(O.fromNullable(type.aliasSymbol))),
+      )(O.match(() => liftNullable(type.getSymbol()), O.some<ts.Symbol>)(liftNullable(type.aliasSymbol))),
   )(type.getCallSignatures().length === 0);
 
 const collectUnionTypeMembers = (ctx: CollectContext) => (unionType: ts.UnionOrIntersectionType) =>
@@ -237,7 +261,7 @@ const collectUnionNames = (ctx: CollectContext) => (type: ts.Type) =>
   O.match(
     () => [] satisfies ReadonlyArray<string>,
     collectUnionTypeMembers(ctx),
-  )(O.fromPredicate(isUnionOrIntersection)(type));
+  )(O.fromPredicate(isUnionOrIntersectionType)(type));
 
 const collectTypeRefArgs = (ctx: CollectContext) => (typeRef: ts.TypeReference) =>
   RA.chain(collectForType(ctx))(ctx.checker.getTypeArguments(typeRef));
@@ -375,7 +399,7 @@ const extractPrimitiveInputKind = (checker: ts.TypeChecker) => (type: ts.Type) =
   );
 };
 
-const isPrimaryBinding = (binding: BindingInfo) => binding.isExported && binding.kind !== 'other';
+const isPrimaryBinding = (binding: BindingInfo) => binding.visibility === 'exported' && binding.kind !== 'other';
 
 const findPrimaryExportedBinding = (ir: ModuleIR) => RA.findFirst(isPrimaryBinding)(ir.bindings);
 
@@ -404,13 +428,17 @@ type RawModuleRef = {
 const getExportNameText = (n: ts.ModuleExportName) => n.text;
 
 const getNamedImportSymbol = (el: ts.ImportSpecifier) =>
-  O.getOrElse(() => el.name.text)(O.map(getExportNameText)(O.fromNullable(el.propertyName)));
+  O.getOrElse(() => getExportNameText(el.name))(
+    O.map(getExportNameText)(liftNullable(el.propertyName)),
+  );
 
 const getNamedExportSymbol = (el: ts.ExportSpecifier) =>
-  O.getOrElse(() => el.name.text)(O.map(getExportNameText)(O.fromNullable(el.propertyName)));
+  O.getOrElse(() => getExportNameText(el.name))(
+    O.map(getExportNameText)(liftNullable(el.propertyName)),
+  );
 
 const extractNamespaceSymbols = (ns: ts.NamespaceImport) => [
-  `* as ${ns.name.text}`,
+  `* as ${getExportNameText(ns.name)}`,
 ] satisfies ReadonlyArray<string>;
 
 const extractNamedImportsList = (named: ts.NamedImports) =>
@@ -432,10 +460,10 @@ const extractDefaultImportSymbol = (name: ts.Identifier) => [
 
 const extractImportClauseSymbols = (clause: ts.ImportClause) => [
   ...O.match(() => [] satisfies ReadonlyArray<string>, extractDefaultImportSymbol)(
-    O.fromNullable(clause.name),
+    liftNullable(clause.name),
   ),
   ...O.match(() => [] satisfies ReadonlyArray<string>, extractNamedImportBindings)(
-    O.fromNullable(clause.namedBindings),
+    liftNullable(clause.namedBindings),
   ),
 ];
 
@@ -443,9 +471,9 @@ const isClauseTypeOnly = (clause: ts.ImportClause) => clause.isTypeOnly === true
 
 const buildImportDeclRef = (decl: ts.ImportDeclaration) => (modSpec: ts.StringLiteral): RawModuleRef => ({
   specifier: modSpec.text,
-  isTypeOnly: O.getOrElse(() => false)(O.map(isClauseTypeOnly)(O.fromNullable(decl.importClause))),
+  isTypeOnly: O.getOrElse(() => false)(O.map(isClauseTypeOnly)(liftNullable(decl.importClause))),
   symbols: O.match(() => [] satisfies ReadonlyArray<string>, extractImportClauseSymbols)(
-    O.fromNullable(decl.importClause),
+    liftNullable(decl.importClause),
   ),
 });
 
@@ -464,7 +492,7 @@ const buildExportDeclRef = (decl: ts.ExportDeclaration) => (modSpec: ts.StringLi
   specifier: modSpec.text,
   isTypeOnly: decl.isTypeOnly,
   symbols: O.match(() => ['*'] satisfies ReadonlyArray<string>, extractExportClauseSymbols)(
-    O.fromNullable(decl.exportClause),
+    liftNullable(decl.exportClause),
   ),
 });
 
@@ -472,7 +500,7 @@ const extractExportDeclFromExpr = (decl: ts.ExportDeclaration) => (modExpr: ts.E
   O.map(buildExportDeclRef(decl))(O.fromPredicate(ts.isStringLiteral)(modExpr));
 
 const extractExportDeclRef = (decl: ts.ExportDeclaration) =>
-  O.chain(extractExportDeclFromExpr(decl))(O.fromNullable(decl.moduleSpecifier));
+  O.chain(extractExportDeclFromExpr(decl))(liftNullable(decl.moduleSpecifier));
 
 const extractStatementRef = (stmt: ts.Statement) =>
   O.match(
@@ -519,7 +547,7 @@ const resolveRawRef =
       ts.sys,
       resolutionCache,
     );
-    const resolvedFileOpt = O.map(getResolvedFileName)(O.fromNullable(resolved.resolvedModule));
+    const resolvedFileOpt = O.map(getResolvedFileName)(liftNullable(resolved.resolvedModule));
     const isInternal = O.getOrElse(() => false)(
       O.map(checkIsInternalFile({ inScopeFiles, sfFileName }))(resolvedFileOpt),
     );
@@ -599,7 +627,7 @@ const isVisited = (visited: ReadonlySet<string>) => (node: string) => visited.ha
 
 const getSetOrEmpty = (edges: ReadonlyMap<string, ReadonlySet<string>>) => (key: string) =>
   Array.from(
-    O.getOrElse((): ReadonlySet<string> => new Set())(O.fromNullable(edges.get(key))),
+    O.getOrElse((): ReadonlySet<string> => new Set())(liftNullable(edges.get(key))),
   );
 
 const advanceBfs =
@@ -735,11 +763,11 @@ const computeTransitiveCounts = ({
 }) => new Map(RA.map(countReachableFrom(outEdges))(nodes));
 
 const lookupDepth = (depthMap: ReadonlyMap<number, number>) => (sccIdx: number) =>
-  O.getOrElse(() => 0)(O.fromNullable(depthMap.get(sccIdx)));
+  O.getOrElse(() => 0)(liftNullable(depthMap.get(sccIdx)));
 
 const getNumberSetOrEmpty = (edges: ReadonlyMap<number, ReadonlySet<number>>) => (key: number) =>
   Array.from(
-    O.getOrElse((): ReadonlySet<number> => new Set())(O.fromNullable(edges.get(key))),
+    O.getOrElse((): ReadonlySet<number> => new Set())(liftNullable(edges.get(key))),
   );
 
 type SccDepthContext = {
@@ -773,7 +801,7 @@ const mapSccToPairs = ([idx, scc]: readonly [number, ReadonlyArray<string>]) =>
   RA.map(pairNodeWithScc(idx))(scc);
 
 const lookupSccForNode = (nodeToScc: ReadonlyMap<string, number>) => (n: string) =>
-  O.fromNullable(nodeToScc.get(n));
+  liftNullable(nodeToScc.get(n));
 
 const isNotSelfScc = (idx: number) => (t: number) => t !== idx;
 
@@ -801,7 +829,7 @@ const lookupNodeLayer =
   }) =>
   (node: string): readonly [string, number] => [
     node,
-    O.match(() => 0, lookupDepth(sccDepth))(O.fromNullable(nodeToScc.get(node))),
+    O.match(() => 0, lookupDepth(sccDepth))(liftNullable(nodeToScc.get(node))),
   ];
 
 const computeLayers = ({
@@ -870,13 +898,27 @@ const hasIntersection = ({
   readonly b: ReadonlyArray<string>;
 }) => B.match(() => checkNonEmptyIntersection({ a, b }), () => false)(a.length === 0 || b.length === 0);
 
-const isCohesionCandidate = (mod: ResolvedModuleData) => !mod.isBarrel && !mod.isTypeOnlyModule;
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoModuleCount = iso<ModuleCount>();
+const isoClusterCount = iso<ClusterCount>();
+const isoCohesionScore = iso<CohesionScore>();
+const isoJaccardScore = iso<JaccardScore>();
+const isoEdgeCount = iso<EdgeCount>();
+const isoCycleCount = iso<CycleCount>();
+const isoDirectoryCount = iso<DirectoryCount>();
+const isoDepthCount = iso<DepthCount>();
+const isoDependencyCount = iso<DependencyCount>();
+const isoLayerIndex = iso<LayerIndex>();
 
-const getModuleDirectory = (mod: ResolvedModuleData) => mod.directory;
+const isCohesionCandidate = (mod: ResolvedModuleData) => mod.moduleKind === 'standard';
 
-const getModuleFilePath = (mod: ResolvedModuleData) => mod.filePath;
+const getModuleDirectory = (mod: ResolvedModuleData) => isoDirectoryPath.unwrap(mod.directory);
 
-const getModuleRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
+const getModuleFilePath = (mod: ResolvedModuleData) => isoFilePath.unwrap(mod.filePath);
+
+const getModuleRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
 
 const getModuleDomainExtDeps = (mod: ResolvedModuleData) => mod.domainExternalDependencies;
 
@@ -890,11 +932,14 @@ const getClusterFirstModule = (c: DirectoryCluster) => O.getOrElse(() => '')(RA.
 
 const clusterFirstModOrd = Ord.contramap(getClusterFirstModule)(S.Ord);
 
+const isBarrelModuleKind = (k: ModuleKind) => k === 'barrel' || k === 'barrel-type-only';
+const isTypeOnlyModuleKind = (k: ModuleKind) => k === 'type-only' || k === 'barrel-type-only';
+
+const isNonBarrelMod = (mod: ResolvedModuleData) => !isBarrelModuleKind(mod.moduleKind);
+
 const isNonBarrelCaller =
   (modules: ReadonlyMap<string, ResolvedModuleData>) => (callerPath: string) =>
-    O.match(() => false, (mod: ResolvedModuleData) => !mod.isBarrel)(
-      O.fromNullable(modules.get(callerPath)),
-    );
+    O.match(() => false, isNonBarrelMod)(liftNullable(modules.get(callerPath)));
 
 const collectCallersEntry =
   ({
@@ -905,8 +950,10 @@ const collectCallersEntry =
     readonly runtimeInEdges: ReadonlyMap<string, ReadonlySet<string>>;
   }) =>
   (mod: ResolvedModuleData): readonly [string, ReadonlySet<string>] => [
-    mod.filePath,
-    new Set(RA.filter(isNonBarrelCaller(modules))(getSetOrEmpty(runtimeInEdges)(mod.filePath))),
+    getModuleFilePath(mod),
+    new Set(
+      RA.filter(isNonBarrelCaller(modules))(getSetOrEmpty(runtimeInEdges)(getModuleFilePath(mod))),
+    ),
   ];
 
 const setContainsTarget = (to: string) => (s: ReadonlySet<string>) => s.has(to);
@@ -914,7 +961,7 @@ const setContainsTarget = (to: string) => (s: ReadonlySet<string>) => s.has(to);
 const hasDirectedEdgeClean =
   (edges: ReadonlyMap<string, ReadonlySet<string>>) =>
   ({ from, to }: { readonly from: string; readonly to: string }) =>
-    O.getOrElse(() => false)(O.map(setContainsTarget(to))(O.fromNullable(edges.get(from))));
+    O.getOrElse(() => false)(O.map(setContainsTarget(to))(liftNullable(edges.get(from))));
 
 type CohesionClusterState = {
   readonly remaining: ReadonlyArray<string>;
@@ -946,10 +993,10 @@ const cohesionClusterStep =
     );
 
 const lookupModule = (modules: ReadonlyMap<string, ResolvedModuleData>) => (f: string) =>
-  O.fromNullable(modules.get(f));
+  liftNullable(modules.get(f));
 
 const lookupModuleRelPath = (modules: ReadonlyMap<string, ResolvedModuleData>) => (c: string) =>
-  O.map(getModuleRelativePath)(O.fromNullable(modules.get(c)));
+  O.map(getModuleRelativePath)(liftNullable(modules.get(c)));
 
 const buildDirectoryCluster =
   ({
@@ -1000,8 +1047,8 @@ const collectIntraDirTargets =
     readonly runtimeOutEdges: ReadonlyMap<string, ReadonlySet<string>>;
   }) =>
   (m: ResolvedModuleData) =>
-    RA.filter(isIntraDirTarget({ dirFileSet, sourceFilePath: m.filePath }))(
-      getSetOrEmpty(runtimeOutEdges)(m.filePath),
+    RA.filter(isIntraDirTarget({ dirFileSet, sourceFilePath: getModuleFilePath(m) }))(
+      getSetOrEmpty(runtimeOutEdges)(getModuleFilePath(m)),
     );
 
 type ModPair = {
@@ -1035,17 +1082,19 @@ const analyzeModPair =
     readonly runtimeOutEdges: ReadonlyMap<string, ReadonlySet<string>>;
   }) =>
   ({ m1, m2 }: ModPair): PairAnalysis => {
+    const f1 = getModuleFilePath(m1);
+    const f2 = getModuleFilePath(m2);
     const c1 = O.getOrElse((): ReadonlySet<string> => new Set())(
-      O.fromNullable(callersByMod.get(m1.filePath)),
+      liftNullable(callersByMod.get(f1)),
     );
     const c2 = O.getOrElse((): ReadonlySet<string> => new Set())(
-      O.fromNullable(callersByMod.get(m2.filePath)),
+      liftNullable(callersByMod.get(f2)),
     );
     const jaccard = jaccardSimilarity({ a: c1, b: c2 });
     const hasCallers = c1.size > 0 || c2.size > 0;
     const intraEdge =
-      hasDirectedEdgeClean(runtimeOutEdges)({ from: m1.filePath, to: m2.filePath }) ||
-      hasDirectedEdgeClean(runtimeOutEdges)({ from: m2.filePath, to: m1.filePath });
+      hasDirectedEdgeClean(runtimeOutEdges)({ from: f1, to: f2 }) ||
+      hasDirectedEdgeClean(runtimeOutEdges)({ from: f2, to: f1 });
     const sharedDomainType = hasIntersection({
       a: m1.referencedDomainTypes,
       b: m2.referencedDomainTypes,
@@ -1062,7 +1111,7 @@ const analyzeModPair =
       )(hasCallers),
       edgeOpt: B.match(
         () => O.none,
-        () => O.some([m1.filePath, m2.filePath] as const),
+        () => O.some([f1, f2] as const),
       )(connected),
     };
   };
@@ -1141,12 +1190,12 @@ const computeDirectoryMetric =
     )(dirMods.length <= 1);
 
     return {
-      directory,
-      moduleCount: dirMods.length,
-      clusterCount: clusters.length,
-      cohesionScore,
-      averageCallerJaccard,
-      intraDirectoryEdges,
+      directory: isoDirectoryPath.wrap(directory),
+      moduleCount: isoModuleCount.wrap(dirMods.length),
+      clusterCount: isoClusterCount.wrap(clusters.length),
+      cohesionScore: isoCohesionScore.wrap(cohesionScore),
+      averageCallerJaccard: isoJaccardScore.wrap(averageCallerJaccard),
+      intraDirectoryEdges: isoEdgeCount.wrap(intraDirectoryEdges),
       distinctExternalDeps,
       clusters,
     };
@@ -1220,9 +1269,9 @@ const isEligibleSourceFile =
     )(isValidTs);
   };
 
-const getBindingName = (b: BindingInfo) => b.name;
+const getBindingName = (b: BindingInfo) => isoSymbolName.unwrap(b.name);
 
-const getBindingSignature = (b: BindingInfo) => b.signature;
+const getBindingSignature = (b: BindingInfo) => isoTypeSignature.unwrap(b.signature);
 
 const analyzePrimaryExport =
   ({ checker, inspector }: { readonly checker: ts.TypeChecker; readonly inspector: TypeInspector }) =>
@@ -1274,7 +1323,7 @@ const resolveModuleEntry =
   (sf: ts.SourceFile): readonly [string, ResolvedModuleData] => {
     const abs = path.resolve(sf.fileName);
     const ir = O.getOrElse(() => extractModuleIR({ sourceFile: sf, checker, inspector }))(
-      O.fromNullable(preExtractedIRs.get(abs)),
+      liftNullable(preExtractedIRs.get(abs)),
     );
     const { isBarrel, isTypeOnlyModule } = detectBarrelAndTypeOnly(sf)(ir);
     const primaryExport = findPrimaryExportedBinding(ir);
@@ -1298,14 +1347,37 @@ const resolveModuleEntry =
     return [
       abs,
       {
-        filePath: abs,
-        relativePath: toRelativePosixPath({ rootDir, filePath: abs }),
-        directory: toRelativeDirectory({ rootDir, filePath: abs }),
+        filePath: isoFilePath.wrap(abs),
+        relativePath: isoRelativePath.wrap(
+          toRelativePosixPath({
+            rootDir: iso<RootDir>().wrap(rootDir),
+            filePath: isoFilePath.wrap(abs),
+          }),
+        ),
+        directory: isoDirectoryPath.wrap(
+          toRelativeDirectory({
+            rootDir: iso<RootDir>().wrap(rootDir),
+            filePath: isoFilePath.wrap(abs),
+          }),
+        ),
         sourceFile: sf,
         ir,
-        isTarget: targetSet.has(abs),
-        isBarrel,
-        isTypeOnlyModule,
+        scope: B.match<ModuleScope>(
+          () => 'dependency',
+          () => 'target',
+        )(targetSet.has(abs)),
+        moduleKind: B.match<ModuleKind>(
+          () =>
+            B.match<ModuleKind>(
+              () =>
+                B.match<ModuleKind>(
+                  () => 'standard',
+                  () => 'type-only',
+                )(isTypeOnlyModule),
+              () => 'barrel',
+            )(isBarrel),
+          () => 'barrel-type-only',
+        )(isBarrel && isTypeOnlyModule),
         exportedFunction: O.map(getBindingName)(primaryExport),
         exportedSignature: O.map(getBindingSignature)(primaryExport),
         exportedEffects: exportAnalysis.exportedEffects,
@@ -1336,12 +1408,12 @@ const buildSingleEdgeRecord =
     readonly imp: ResolvedModuleData['internalImports'][number];
   }) =>
   (targetMod: ResolvedModuleData): RawEdgeRecord => ({
-    fromFile: mod.filePath,
+    fromFile: isoFilePath.unwrap(mod.filePath),
     toFile: imp.targetFile,
     isTypeOnly: imp.isTypeOnly,
     edge: {
-      from: mod.relativePath,
-      to: targetMod.relativePath,
+      from: isoFilePath.wrap(isoRelativePath.unwrap(mod.relativePath)),
+      to: isoFilePath.wrap(isoRelativePath.unwrap(targetMod.relativePath)),
       isTypeOnly: imp.isTypeOnly,
       importedSymbols: imp.importedSymbols,
     },
@@ -1350,7 +1422,7 @@ const buildSingleEdgeRecord =
 const buildEdgeForImport =
   ({ modules, mod }: { readonly modules: ReadonlyMap<string, ResolvedModuleData>; readonly mod: ResolvedModuleData }) =>
   (imp: ResolvedModuleData['internalImports'][number]) =>
-    O.map(buildSingleEdgeRecord({ mod, imp }))(O.fromNullable(modules.get(imp.targetFile)));
+    O.map(buildSingleEdgeRecord({ mod, imp }))(liftNullable(modules.get(imp.targetFile)));
 
 const buildEdgesForModule =
   (modules: ReadonlyMap<string, ResolvedModuleData>) => (mod: ResolvedModuleData) =>
@@ -1416,27 +1488,31 @@ const buildModuleNodeFromData =
     readonly transitiveCounts: ReadonlyMap<string, number>;
   }) =>
   (mod: ResolvedModuleData): ProjectModuleNode => {
-    const inDegree = O.getOrElse(() => 0)(O.map(getSetSize)(O.fromNullable(allInEdges.get(f))));
-    const outDegree = O.getOrElse(() => 0)(O.map(getSetSize)(O.fromNullable(allOutEdges.get(f))));
-    const layer = O.getOrElse(() => 0)(O.fromNullable(layers.get(f)));
+    const inDegree = O.getOrElse(() => 0)(O.map(getSetSize)(liftNullable(allInEdges.get(f))));
+    const outDegree = O.getOrElse(() => 0)(O.map(getSetSize)(liftNullable(allOutEdges.get(f))));
+    const layer = O.getOrElse(() => 0)(liftNullable(layers.get(f)));
     return {
       filePath: mod.filePath,
       relativePath: mod.relativePath,
       directory: mod.directory,
-      isTarget: mod.isTarget,
-      isBarrel: mod.isBarrel,
-      isTypeOnlyModule: mod.isTypeOnlyModule,
-      isEntrypoint: inDegree === 0 && !mod.isTypeOnlyModule,
+      scope: mod.scope,
+      moduleKind: mod.moduleKind,
+      role: B.match<ModuleRole>(
+        () => 'internal',
+        () => 'entrypoint',
+      )(inDegree === 0 && !isTypeOnlyModuleKind(mod.moduleKind)),
       exportedFunction: mod.exportedFunction,
       exportedSignature: mod.exportedSignature,
       effects: mod.exportedEffects,
-      inDegree,
-      outDegree,
-      transitiveDependencyCount: O.getOrElse(() => 0)(O.fromNullable(transitiveCounts.get(f))),
+      inDegree: isoModuleCount.wrap(inDegree),
+      outDegree: isoModuleCount.wrap(outDegree),
+      transitiveDependencyCount: isoDependencyCount.wrap(
+        O.getOrElse(() => 0)(liftNullable(transitiveCounts.get(f))),
+      ),
       externalDependencies: mod.externalDependencies,
       domainExternalDependencies: mod.domainExternalDependencies,
       referencedDomainTypes: mod.referencedDomainTypes,
-      layer,
+      layer: isoLayerIndex.wrap(layer),
     };
   };
 
@@ -1456,16 +1532,16 @@ const buildNodeForFile =
   }) =>
   (f: string) =>
     O.map(buildModuleNodeFromData({ f, allInEdges, allOutEdges, layers, transitiveCounts }))(
-      O.fromNullable(modules.get(f)),
+      liftNullable(modules.get(f)),
     );
 
-const toNodeEntry = (node: ProjectModuleNode) => [node.filePath, node] as const;
+const toNodeEntry = (node: ProjectModuleNode) => [isoFilePath.unwrap(node.filePath), node] as const;
 
-const getNodeLayer = (n: ProjectModuleNode) => n.layer;
+const getNodeLayer = (n: ProjectModuleNode) => isoLayerIndex.unwrap(n.layer);
 
-const isNodeBarrel = (n: ProjectModuleNode) => n.isBarrel;
+const isNodeBarrel = (n: ProjectModuleNode) => isBarrelModuleKind(n.moduleKind);
 
-const getNodeDirectory = (n: ProjectModuleNode) => n.directory;
+const getNodeDirectory = (n: ProjectModuleNode) => isoDirectoryPath.unwrap(n.directory);
 
 export const buildProjectDag = (({
   program,
@@ -1544,13 +1620,13 @@ export const buildProjectDag = (({
   const barrelCount = RA.filter(isNodeBarrel)(nodes).length;
 
   const summary: ProjectDagSummary = {
-    analyzedModuleCount: nodes.length,
-    targetFileCount: targetFiles.length,
-    edgeCount: edges.length,
-    cycleCount: cycles.length,
-    directoryCount: new Set(RA.map(getNodeDirectory)(nodes)).size,
-    maxDepth,
-    barrelCount,
+    analyzedModuleCount: isoModuleCount.wrap(nodes.length),
+    targetFileCount: isoModuleCount.wrap(targetFiles.length),
+    edgeCount: isoEdgeCount.wrap(edges.length),
+    cycleCount: isoCycleCount.wrap(cycles.length),
+    directoryCount: isoDirectoryCount.wrap(new Set(RA.map(getNodeDirectory)(nodes)).size),
+    maxDepth: isoDepthCount.wrap(maxDepth),
+    barrelCount: isoModuleCount.wrap(barrelCount),
   };
 
   return {

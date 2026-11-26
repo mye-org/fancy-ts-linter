@@ -73,10 +73,9 @@ const serializeProjectNode = (n: ProjectModuleNode) => ({
   filePath: n.filePath,
   relativePath: n.relativePath,
   directory: n.directory,
-  isTarget: n.isTarget,
-  isBarrel: n.isBarrel,
-  isTypeOnlyModule: n.isTypeOnlyModule,
-  isEntrypoint: n.isEntrypoint,
+  scope: n.scope,
+  moduleKind: n.moduleKind,
+  role: n.role,
   exportedFunction: orEmptyString(n.exportedFunction),
   exportedSignature: orEmptyString(n.exportedSignature),
   effects: n.effects,
@@ -97,20 +96,28 @@ const serializeProjectGraph = (g: ProjectDagGraph) => ({
   directories: g.directories,
 });
 
-const toProjectGraphField = (g: ProjectDagGraph) => ({
-  projectGraph: serializeProjectGraph(g),
-});
+const attachProjectGraph =
+  (base: Omit<ReturnType<typeof buildBaseSerializableReport>, never>) =>
+  (g: ProjectDagGraph) => ({
+    ...base,
+    projectGraph: serializeProjectGraph(g),
+  });
 
-const optionalProjectGraph = O.match(emptyRecord, toProjectGraphField);
-
-const buildSerializableReport = (report: ProjectAnalysisReport) => ({
+const buildBaseSerializableReport = (report: ProjectAnalysisReport) => ({
   passed: report.passed,
   summary: report.summary,
   files: RA.map(serializeFileReport)(report.files),
   projectGraphSummary: report.projectGraphSummary,
-  ...optionalProjectGraph(report.projectGraph),
   crossFileHints: RA.map(serializeCrossFileHint)(report.crossFileHints),
 });
+
+const buildSerializableReport = (report: ProjectAnalysisReport) => {
+  const base = buildBaseSerializableReport(report);
+  return O.match(
+    () => base,
+    attachProjectGraph(base),
+  )(report.projectGraph);
+};
 
 export const formatJsonReports = ((report) =>
   JSON.stringify(buildSerializableReport(report), null, 2)) satisfies FormatProjectReport;

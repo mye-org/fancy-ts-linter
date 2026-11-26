@@ -90,11 +90,11 @@ export const calcRefund = ((r: RefundAmount) => r.amountCents) satisfies CalcRef
     if (E.isLeft(res)) return;
 
     const dmHints = res.right.crossFileHints.filter((h) => h.category === 'missing-domain-model');
-    expect(dmHints.some((h) => h.hintId.startsWith('missing-domain-model-fields'))).toBe(true);
-    expect(dmHints.some((h) => h.hintId.startsWith('missing-domain-model-adt'))).toBe(true);
+    expect(dmHints.some((h) => String(h.hintId).startsWith('missing-domain-model-fields'))).toBe(true);
+    expect(dmHints.some((h) => String(h.hintId).startsWith('missing-domain-model-adt'))).toBe(true);
     expect(
       dmHints.some(
-        (h) => h.hintId === 'missing-domain-model-newtype-currencyCode',
+        (h) => String(h.hintId) === 'missing-domain-model-newtype-currencyCode',
       ),
     ).toBe(true);
   });
@@ -214,9 +214,9 @@ export const mergeInvoice = ((a: Invoice) => (b: Invoice) => ({ invoiceId: a.inv
     const genericHints = res.right.crossFileHints.filter(
       (h) => h.category === 'generic-abstraction',
     );
-    expect(genericHints.some((h) => h.hintId.startsWith('generic-datatype-'))).toBe(true);
+    expect(genericHints.some((h) => String(h.hintId).startsWith('generic-datatype-'))).toBe(true);
     expect(
-      genericHints.some((h) => h.hintId === 'generic-typeclass-semigroup-monoid'),
+      genericHints.some((h) => String(h.hintId) === 'generic-typeclass-semigroup-monoid'),
     ).toBe(true);
   });
 
@@ -330,8 +330,8 @@ export const calcRate = ((code: string) => (fetchFx(code) ? code : code)) satisf
     if (E.isLeft(res)) return;
 
     const archHints = res.right.crossFileHints.filter((h) => h.category === 'architectural-motif');
-    expect(archHints.some((h) => h.hintId.startsWith('architectural-motif-strategy-'))).toBe(true);
-    expect(archHints.some((h) => h.hintId.startsWith('architectural-motif-shared-optic-'))).toBe(true);
-    expect(archHints.some((h) => h.hintId.startsWith('architectural-motif-effect-leak-'))).toBe(true);
+    expect(archHints.some((h) => String(h.hintId).startsWith('architectural-motif-strategy-'))).toBe(true);
+    expect(archHints.some((h) => String(h.hintId).startsWith('architectural-motif-shared-optic-'))).toBe(true);
+    expect(archHints.some((h) => String(h.hintId).startsWith('architectural-motif-effect-leak-'))).toBe(true);
   });
 });

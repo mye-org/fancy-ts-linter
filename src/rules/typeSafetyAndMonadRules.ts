@@ -4,12 +4,19 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { BindingInfo, DiagnosticError, RuleContext, TypeDeclInfo } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { BindingInfo, DiagnosticError, RuleContext, TypeDeclInfo, DiagnosticMessage, FixGuidance, RuleId } from '../model/report.js';
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
 const boundaryLiftLens = Lens.fromPath<RuleContext>()(['inspector', 'isBoundaryLiftCall']);
 const hasNullablePartLens = Lens.fromPath<RuleContext>()(['inspector', 'hasNullablePart']);
+const irBindingsLens = Lens.fromPath<RuleContext>()(['ir', 'bindings']);
+const hasRawPromiseLens = Lens.fromPath<RuleContext>()(['inspector', 'hasRawPromise']);
 
 const expandNode =
   ({ sf, tail }: { readonly sf: ts.SourceFile; readonly tail: ReadonlyArray<ts.Node> }) =>
@@ -32,13 +39,12 @@ type SafetyErrorInput = {
 
 const makeSafetyError =
   (ctx: RuleContext) =>
-  ({ ruleId, category, node, message, fixGuidance }: SafetyErrorInput): DiagnosticError => ({
-    ruleId,
+  ({ ruleId, category, node, message, fixGuidance }: SafetyErrorInput): DiagnosticError => ({    ruleId: isoRuleId.wrap(ruleId),
     category,
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const isAsConst = (n: ts.AsExpression) =>
@@ -122,10 +128,13 @@ type DeclCheckInput = {
   readonly decl: ts.VariableDeclaration;
 };
 
+const getParamType = ({ ctx, decl }: DeclCheckInput) => (p: ts.Symbol) =>
+  ctx.checker.getTypeOfSymbolAtLocation(p, decl);
+
 const paramHasNullablePart =
-  ({ ctx, decl }: DeclCheckInput) =>
+  (input: DeclCheckInput) =>
   (p: ts.Symbol) =>
-    hasNullablePartLens.get(ctx)(ctx.checker.getTypeOfSymbolAtLocation(p, decl));
+    hasNullablePartLens.get(input.ctx)(getParamType(input)(p));
 
 const sigHasNullableParam = (input: DeclCheckInput) => (sig: ts.Signature) =>
   RA.some(paramHasNullablePart(input))(sig.getParameters());
@@ -133,8 +142,11 @@ const sigHasNullableParam = (input: DeclCheckInput) => (sig: ts.Signature) =>
 const sigHasNullableReturn = (ctx: RuleContext) => (sig: ts.Signature) =>
   hasNullablePartLens.get(ctx)(sig.getReturnType());
 
+const getDeclType = (ctx: RuleContext) => (decl: ts.VariableDeclaration) =>
+  ctx.checker.getTypeAtLocation(decl);
+
 const hasNullableSig = (ctx: RuleContext) => (b: BindingInfo) => {
-  const sigs = ctx.checker.getTypeAtLocation(b.declaration).getCallSignatures();
+  const sigs = getDeclType(ctx)(b.declaration).getCallSignatures();
   return (
     RA.some(sigHasNullableParam({ ctx, decl: b.declaration }))(sigs) ||
     RA.some(sigHasNullableReturn(ctx))(sigs)
@@ -161,10 +173,10 @@ const checkNullableBinding = (ctx: RuleContext) => (b: BindingInfo) =>
   )(shouldFlagNullableBinding(ctx)(b));
 
 const checkNullableBindings = (ctx: RuleContext) =>
-  RA.chain(checkNullableBinding(ctx))(ctx.ir.bindings);
+  RA.chain(checkNullableBinding(ctx))(irBindingsLens.get(ctx));
 
 const isNullableOrOptionalField = (f: TypeDeclInfo['fields'][number]) =>
-  f.isNullable || f.isOptional;
+  f.nullability !== 'required';
 
 const getFieldName = (f: TypeDeclInfo['fields'][number]) => f.name;
 
@@ -197,16 +209,16 @@ const checkNullableTypeDecls = (ctx: RuleContext) =>
   RA.chain(checkNullableTypeDecl(ctx))(ctx.ir.typeDeclarations);
 
 const paramHasRawPromise =
-  ({ ctx, decl }: DeclCheckInput) =>
+  (input: DeclCheckInput) =>
   (p: ts.Symbol) =>
-    ctx.inspector.hasRawPromise(ctx.checker.getTypeOfSymbolAtLocation(p, decl));
+    hasRawPromiseLens.get(input.ctx)(getParamType(input)(p));
 
 const sigHasRawPromise = (input: DeclCheckInput) => (sig: ts.Signature) =>
-  input.ctx.inspector.hasRawPromise(sig.getReturnType()) ||
+  hasRawPromiseLens.get(input.ctx)(sig.getReturnType()) ||
   RA.some(paramHasRawPromise(input))(sig.getParameters());
 
 const hasRawPromiseSig = (ctx: RuleContext) => (b: BindingInfo) => {
-  const sigs = ctx.checker.getTypeAtLocation(b.declaration).getCallSignatures();
+  const sigs = getDeclType(ctx)(b.declaration).getCallSignatures();
   return RA.some(sigHasRawPromise({ ctx, decl: b.declaration }))(sigs);
 };
 
@@ -230,7 +242,7 @@ const checkRawPromiseBinding = (ctx: RuleContext) => (b: BindingInfo) =>
   )(shouldFlagRawPromiseBinding(ctx)(b));
 
 const checkRawPromiseBindings = (ctx: RuleContext) =>
-  RA.chain(checkRawPromiseBinding(ctx))(ctx.ir.bindings);
+  RA.chain(checkRawPromiseBinding(ctx))(irBindingsLens.get(ctx));
 
 const hasSpreadProperty = (obj: ts.ObjectLiteralExpression) =>
   RA.some(ts.isSpreadAssignment)(obj.properties);

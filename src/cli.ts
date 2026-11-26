@@ -6,6 +6,7 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { parseArgs } from 'node:util';
 import { match, P } from 'ts-pattern';
+import { Newtype, iso } from 'newtype-ts';
 import {
   analyzeFiles,
   type AnalyzeOptions,
@@ -15,13 +16,21 @@ import {
 import { formatJsonReports } from './reporters/jsonReporter.js';
 import { formatMarkdownReports } from './reporters/markdownReporter.js';
 
+export type ExitCode = Newtype<{ readonly ExitCode: unique symbol }, number>;
+export type StdoutText = Newtype<{ readonly StdoutText: unique symbol }, string>;
+export type StderrText = Newtype<{ readonly StderrText: unique symbol }, string>;
+
 export type CliResult = {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
+  readonly exitCode: ExitCode;
+  readonly stdout: StdoutText;
+  readonly stderr: StderrText;
 };
 
 export type RunCli = (argv: ReadonlyArray<string>) => CliResult;
+
+const isoExitCode = iso<ExitCode>();
+const isoStdoutText = iso<StdoutText>();
+const isoStderrText = iso<StderrText>();
 
 type ParsedCli =
   | { readonly _tag: 'Help' }
@@ -207,38 +216,43 @@ const parseCliArgs = (argv: ReadonlyArray<string>): E.Either<string, ParsedCli> 
   E.chain(validateAndBuildCli)(parseRawArgs(argv));
 
 const formatOutput = ({ format, report }: FormatOutputInput) =>
-  match(format)
-    .with('md', () => formatMarkdownReports(report))
-    .with('json', () => formatJsonReports(report))
-    .exhaustive();
+  B.match(
+    () => formatJsonReports(report),
+    () => formatMarkdownReports(report),
+  )(format === 'md');
 
 const toCliError = (stderr: string) => ({
-  exitCode: 2,
-  stdout: '',
-  stderr,
+  exitCode: isoExitCode.wrap(2),
+  stdout: isoStdoutText.wrap(''),
+  stderr: isoStderrText.wrap(stderr),
 });
 
 const toCliReportResult =
   (format: OutputFormat) =>
   (report: ProjectAnalysisReport): CliResult => ({
-    exitCode: B.match(
-      () => 1,
-      () => 0,
-    )(report.passed),
-    stdout: formatOutput({ format, report }),
-    stderr: '',
+    exitCode: isoExitCode.wrap(
+      B.match(
+        () => 1,
+        () => 0,
+      )(report.passed),
+    ),
+    stdout: isoStdoutText.wrap(formatOutput({ format, report })),
+    stderr: isoStderrText.wrap(''),
   });
 
-const executeHelpCli = constant({
-  exitCode: 0,
-  stdout: getHelpText(),
-  stderr: '',
+const executeHelpCli = constant<CliResult>({
+  exitCode: isoExitCode.wrap(0),
+  stdout: isoStdoutText.wrap(getHelpText()),
+  stderr: isoStderrText.wrap(''),
 });
 
 const executeRunCli = ({
   filePaths,
   options,
-}: Extract<ParsedCli, { readonly _tag: 'Run' }>) =>
+}: {
+  readonly filePaths: ReadonlyArray<string>;
+  readonly options: AnalyzeOptions;
+}) =>
   E.match(
     toCliError,
     toCliReportResult(options.format),
@@ -247,7 +261,10 @@ const executeRunCli = ({
 const executeParsedCli = (parsed: ParsedCli) =>
   match(parsed)
     .with({ _tag: 'Help' }, executeHelpCli)
-    .with({ _tag: 'Run' }, executeRunCli)
+    .with(
+      { _tag: 'Run', filePaths: P.select('filePaths'), options: P.select('options') },
+      executeRunCli,
+    )
     .exhaustive();
 
 export const runCli = ((argv) =>

@@ -1,6 +1,9 @@
 import * as B from 'fp-ts/lib/boolean.js';
+import { iso } from 'newtype-ts';
 import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as RNEA from 'fp-ts/lib/ReadonlyNonEmptyArray.js';
 import * as S from 'fp-ts/lib/string.js';
@@ -9,7 +12,21 @@ import type {
   BuiltProjectDag,
   CrossFileHint,
   ResolvedModuleData,
+  DirectoryPath,
+  LayerIndex,
+  ModuleCount,
+  RelativePath,
 } from '../model/projectReport.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoModuleCount = iso<ModuleCount>();
 import type { BindingInfo } from '../model/report.js';
 
 export type EnvThreadingInput = {
@@ -76,13 +93,13 @@ const isIoEffect = (e: string) =>
 
 const isEffectfulIo = RA.some(isIoEffect);
 
-const isTargetModule = (mod: ResolvedModuleData) => mod.isTarget;
-const getRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
+const isTargetModule = (mod: ResolvedModuleData) => mod.scope === 'target';
+const getRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
 const getExportedFn = (mod: ResolvedModuleData) => mod.exportedFunction;
 
 const involvesAnyTarget = (dag: BuiltProjectDag) => (files: ReadonlyArray<string>) => {
   const targetFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(dag))),
   );
   return RA.some(inSet(targetFiles))(files);
 };
@@ -92,12 +109,12 @@ const getSymbolName = (sym: ts.Symbol) => sym.getName();
 const getTypeSymbolName = (t: ts.Type) =>
   O.getOrElse(constant(''))(
     O.map(getSymbolName)(
-      RA.head(RA.compact([O.fromNullable(t.aliasSymbol), O.fromNullable(t.getSymbol())])),
+      RA.head(RA.compact([liftNullable(t.aliasSymbol), liftNullable(t.getSymbol())])),
     ),
   );
 
 const isNamedPublicType = (name: string) => name.length > 0 && !name.startsWith('__');
-const isExportedNonOtherBinding = (b: BindingInfo) => b.isExported && b.kind !== 'other';
+const isExportedNonOtherBinding = (b: BindingInfo) => b.visibility === 'exported' && b.kind !== 'other';
 
 const extractPropSignal =
   (input: { readonly checker: ts.TypeChecker; readonly declaration: ts.Node }) =>
@@ -167,7 +184,7 @@ const extractEnvSignals =
       () => [],
     )(RA.some(isReaderEffect)(mod.exportedEffects));
 
-const isActiveModule = (mod: ResolvedModuleData) => !mod.isBarrel && !mod.isTypeOnlyModule;
+const isActiveModule = (mod: ResolvedModuleData) => mod.moduleKind === 'standard';
 
 const toSignalOccurrence =
   (filePath: string) =>
@@ -176,7 +193,7 @@ const toSignalOccurrence =
 const collectModuleSignals =
   (checker: ts.TypeChecker) =>
   (mod: ResolvedModuleData) =>
-    RA.map(toSignalOccurrence(mod.filePath))(extractEnvSignals(checker)(mod));
+    RA.map(toSignalOccurrence(isoFilePath.unwrap(mod.filePath)))(extractEnvSignals(checker)(mod));
 
 const getSignalKey = (o: SignalOccurrence) => o.signal;
 const getSignalFilePath = (o: SignalOccurrence) => o.filePath;
@@ -186,7 +203,7 @@ const getEdgeSet =
   (curr: string) =>
     Array.from(
       O.getOrElse(constant<ReadonlySet<string>>(new Set()))(
-        O.fromNullable(edgeMap.get(curr)),
+        liftNullable(edgeMap.get(curr)),
       ),
     );
 
@@ -259,7 +276,7 @@ const findConnectedComponents = (input: {
 const lookupModule =
   (dag: BuiltProjectDag) =>
   (f: string) =>
-    O.fromNullable(dag.modules.get(f));
+    liftNullable(dag.modules.get(f));
 
 const hasEffectfulIoMod = (m: ResolvedModuleData) => isEffectfulIo(m.exportedEffects);
 
@@ -291,7 +308,7 @@ const buildEnvThreadingHint = (input: {
       `export type DomainOp = (input: Input) => RTE.ReaderTaskEither<${cleanSignal}, DomainError, Output>;`,
   )(hasAsync);
   return {
-    hintId: `environment-threading-${cleanSignal.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+    hintId: isoHintId.wrap(`environment-threading-${cleanSignal.replace(/[^a-zA-Z0-9_-]/g, '_')}`),
     category: 'environment-threading' as const,
     priority: 'high' as const,
     files: input.relFiles,
@@ -353,7 +370,7 @@ export const discoverEnvThreading = (({
   minOcc,
 }: EnvThreadingInput): ReadonlyArray<CrossFileHint> => {
   const occurrences = RA.chain(collectModuleSignals(checker))(
-    RA.filter(isActiveModule)(Array.from(dag.modules.values())),
+    RA.filter(isActiveModule)(listDagModules(dag)),
   );
   const grouped = RNEA.groupBy(getSignalKey)(occurrences);
   return RA.chain(processSignalGroup({ dag, minOcc }))(Object.entries(grouped));

@@ -1,4 +1,5 @@
 import * as B from 'fp-ts/lib/boolean.js';
+import { iso } from 'newtype-ts';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { reverse as raReverse, sort as raSort } from 'fp-ts/lib/ReadonlyArray.js';
@@ -8,12 +9,36 @@ import { constant } from 'fp-ts/lib/function.js';
 import { Lens } from 'monocle-ts';
 import type {
   BuiltProjectDag,
+  ClusterCount,
+  CohesionScore,
   CrossFileHint,
+  DependencyCount,
   DirectoryCluster,
   DirectoryCohesionMetric,
+  DirectoryPath,
+  EdgeCount,
+  JaccardScore,
+  LayerIndex,
+  ModuleCount,
   ProjectModuleNode,
+  RelativePath,
   ResolvedModuleData,
 } from '../model/projectReport.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoClusterCount = iso<ClusterCount>();
+const isoCohesionScore = iso<CohesionScore>();
+const isoEdgeCount = iso<EdgeCount>();
+const isoJaccardScore = iso<JaccardScore>();
+const isoDependencyCount = iso<DependencyCount>();
+const isoModuleCount = iso<ModuleCount>();
 
 export type DagSmellOptions = {
   readonly minDirModules: number;
@@ -55,7 +80,7 @@ type BfsCycleState = {
   readonly done: boolean;
 };
 
-type BfsCycleCtx = {
+type BfsCycleInput = {
   readonly start: string;
   readonly sccSet: ReadonlySet<string>;
   readonly outEdges: ReadonlyMap<string, ReadonlySet<string>>;
@@ -120,23 +145,23 @@ const splitDirParts = (d: string) =>
     constant<ReadonlyArray<string>>([]),
   )(d === '.');
 
-type SegmentCheckCtx = {
+type SegmentCheckInput = {
   readonly idx: number;
   readonly seg: string;
 };
 
 const hasSegmentAt =
-  ({ idx, seg }: SegmentCheckCtx) =>
+  ({ idx, seg }: SegmentCheckInput) =>
   (parts: ReadonlyArray<string>) =>
     O.exists(isEqualString(seg))(RA.lookup(idx)(parts));
 
-type LcpCheckCtx = {
+type LcpCheckInput = {
   readonly split: ReadonlyArray<ReadonlyArray<string>>;
   readonly idx: number;
 };
 
 const checkAllMatchAt =
-  ({ split, idx }: LcpCheckCtx) =>
+  ({ split, idx }: LcpCheckInput) =>
   (seg: string): O.Option<readonly [string, number]> =>
     B.match(
       constant<O.Option<readonly [string, number]>>(O.none),
@@ -163,13 +188,13 @@ const computeDirectoryLca = (dirs: ReadonlyArray<string>) =>
     constant('.'),
   )(dirs.length === 0);
 
-type ReconstructCtx = {
+type ReconstructInput = {
   readonly start: string;
   readonly prev: ReadonlyMap<string, string>;
 };
 
 const reconstructNodeStep =
-  ({ start, prev }: ReconstructCtx) =>
+  ({ start, prev }: ReconstructInput) =>
   (node: string): O.Option<readonly [string, O.Option<string>]> =>
     B.match(
       constant<O.Option<readonly [string, O.Option<string>]>>(
@@ -178,7 +203,7 @@ const reconstructNodeStep =
       constant<O.Option<readonly [string, O.Option<string>]>>(O.none),
     )(node === start);
 
-const reconstructStep = (ctx: ReconstructCtx) => O.chain(reconstructNodeStep(ctx));
+const reconstructStep = (ctx: ReconstructInput) => O.chain(reconstructNodeStep(ctx));
 
 type WitnessFromPrevInput = {
   readonly start: string;
@@ -197,7 +222,7 @@ const buildWitnessFromPrev = ({
 ];
 
 type BfsStepData = {
-  readonly ctx: BfsCycleCtx;
+  readonly ctx: BfsCycleInput;
   readonly state: BfsCycleState;
   readonly curr: string;
   readonly restQueue: ReadonlyArray<string>;
@@ -235,13 +260,13 @@ const finishBfsWithWitness = ({
   return [O.some(witness), nextState] as const;
 };
 
-type BfsProcessCtx = {
-  readonly ctx: BfsCycleCtx;
+type BfsProcessInput = {
+  readonly ctx: BfsCycleInput;
   readonly state: BfsCycleState;
 };
 
 const processBfsHead =
-  ({ ctx, state }: BfsProcessCtx) =>
+  ({ ctx, state }: BfsProcessInput) =>
   (curr: string) => {
     const restQueue = RA.dropLeft(1)(state.queue);
     const neighbors = RA.filter(isMemberOf(ctx.sccSet))(getEdgeTargets(ctx.outEdges)(curr));
@@ -253,7 +278,7 @@ const processBfsHead =
   };
 
 const bfsCycleStep =
-  (ctx: BfsCycleCtx) =>
+  (ctx: BfsCycleInput) =>
   (state: BfsCycleState): O.Option<readonly [O.Option<ReadonlyArray<string>>, BfsCycleState]> =>
     B.match(
       () => O.map(processBfsHead({ ctx, state }))(RA.head(state.queue)),
@@ -303,25 +328,25 @@ const findCycleWitnessPath = (input: CycleWitnessInput) =>
     searchCycleWitness(input),
   )(RA.head(input.scc));
 
-const isModTarget = (m: ResolvedModuleData) => m.isTarget;
-const getModRelativePath = (m: ResolvedModuleData) => m.relativePath;
+const isModTarget = (m: ResolvedModuleData) => m.scope === 'target';
+const getModRelativePath = (m: ResolvedModuleData) => isoRelativePath.unwrap(m.relativePath);
 const getModExportedFunction = (m: ResolvedModuleData) => m.exportedFunction;
-const getModDirectory = (m: ResolvedModuleData) => m.directory;
-const isBarrelMod = (m: ResolvedModuleData) => m.isBarrel;
-const isNotBarrelMod = (m: ResolvedModuleData) => !m.isBarrel;
-const isRuntimeMod = (m: ResolvedModuleData) => !m.isBarrel && !m.isTypeOnlyModule;
+const getModDirectory = (m: ResolvedModuleData) => isoDirectoryPath.unwrap(m.directory);
+const isBarrelMod = (m: ResolvedModuleData) => (m.moduleKind === 'barrel' || m.moduleKind === 'barrel-type-only');
+const isNotBarrelMod = (m: ResolvedModuleData) => (m.moduleKind !== 'barrel' && m.moduleKind !== 'barrel-type-only');
+const isRuntimeMod = (m: ResolvedModuleData) => m.moduleKind === 'standard';
 
 const isFileTarget =
   (modules: ReadonlyMap<string, ResolvedModuleData>) => (filePath: string) =>
     O.exists(isModTarget)(lookupModule(modules)(filePath));
 
-type RuntimeEdgeCtx = {
+type RuntimeEdgeInput = {
   readonly runtimeOutEdges: ReadonlyMap<string, ReadonlySet<string>>;
   readonly sccSet: ReadonlySet<string>;
 };
 
 const hasRuntimeEdgeIntoScc =
-  ({ runtimeOutEdges, sccSet }: RuntimeEdgeCtx) =>
+  ({ runtimeOutEdges, sccSet }: RuntimeEdgeInput) =>
   (filePath: string) =>
     RA.some(isMemberOf(sccSet))(getEdgeTargets(runtimeOutEdges)(filePath));
 
@@ -369,7 +394,7 @@ const createCycleHint = ({ dag, scc, oneBasedIdx }: BuildCycleHintInput): O.Opti
   )(hasRuntimeEdgeInScc);
 
   return O.some({
-    hintId: `dependency-cycle-${oneBasedIdx}`,
+    hintId: isoHintId.wrap(`dependency-cycle-${oneBasedIdx}`),
     category: 'dependency-cycle',
     priority,
     files: relFiles,
@@ -415,12 +440,12 @@ const isPureHomogeneousPrimitiveLibrary = ({ dirMods, metric }: PureHomogeneousI
 };
 
 const isDirRuntimeModule = (directory: string) => (m: ResolvedModuleData) =>
-  m.directory === directory && isRuntimeMod(m);
+  isoDirectoryPath.unwrap(m.directory) === directory && isRuntimeMod(m);
 
 const clusterHasDeps = (c: DirectoryCluster) => sharedDepsLens.get(c).length > 0;
 const clusterHasCallers = (c: DirectoryCluster) => callersLens.get(c).length > 0;
 
-const findByRelativePath = (rel: string) => (m: ResolvedModuleData) => m.relativePath === rel;
+const findByRelativePath = (rel: string) => (m: ResolvedModuleData) => isoRelativePath.unwrap(m.relativePath) === rel;
 
 const getModDomainTypes = (m: ResolvedModuleData) => m.referencedDomainTypes;
 
@@ -440,7 +465,7 @@ const isNonEmptySet = (s: ReadonlySet<string>) => s.size > 0;
 const hasSingleNonBarrelCaller =
   (dag: BuiltProjectDag) => (m: ResolvedModuleData) =>
     RA.filter(isNotBarrelMod)(
-      RA.filterMap(lookupModule(dag.modules))(getEdgeTargets(dag.runtimeInEdges)(m.filePath)),
+      RA.filterMap(lookupModule(dag.modules))(getEdgeTargets(dag.runtimeInEdges)(isoFilePath.unwrap(m.filePath))),
     ).length === 1;
 
 const formatCallersPart = (callers: ReadonlyArray<string>) => {
@@ -486,20 +511,20 @@ const createJunkDrawerHint = ({
   const priority = B.match(
     constant<'medium' | 'high'>('medium'),
     constant<'medium' | 'high'>('high'),
-  )(hasHeterogeneousDeps || metric.clusterCount >= 4);
+  )(hasHeterogeneousDeps || isoClusterCount.unwrap(metric.clusterCount) >= 4);
 
   return O.some({
-    hintId: `junk-drawer-directory-${sanitizeIdPart(metric.directory)}`,
+    hintId: isoHintId.wrap(`junk-drawer-directory-${sanitizeIdPart(isoDirectoryPath.unwrap(metric.directory))}`),
     category: 'junk-drawer-directory',
     priority,
     files: raSort(S.Ord)(RA.map(getModRelativePath)(dirMods)),
     symbols,
-    evidence: `Directory "${metric.directory}" behaves as a low-cohesion junk drawer (cohesion=${metric.cohesionScore}, ${metric.clusterCount} disconnected clusters across ${metric.moduleCount} modules, avg caller overlap=${metric.averageCallerJaccard}, intra-dir edges=${metric.intraDirectoryEdges}): ${clusterSummary}.`,
+    evidence: `Directory "${isoDirectoryPath.unwrap(metric.directory)}" behaves as a low-cohesion junk drawer (cohesion=${metric.cohesionScore}, ${metric.clusterCount} disconnected clusters across ${metric.moduleCount} modules, avg caller overlap=${metric.averageCallerJaccard}, intra-dir edges=${metric.intraDirectoryEdges}): ${clusterSummary}.`,
     suggestion:
       'Split this directory by domain/capability rather than keeping unrelated modules together: move single-caller modules next to their calling feature and group multi-caller modules by shared domain types or external adapters.',
     suggestedSignature: O.none,
     researchQuestions: [
-      `Do the ${metric.clusterCount} disconnected clusters in "${metric.directory}" actually belong to distinct bounded contexts?`,
+      `Do the ${metric.clusterCount} disconnected clusters in "${isoDirectoryPath.unwrap(metric.directory)}" actually belong to distinct bounded contexts?`,
       'Which modules in this folder have only a single calling feature and can be co-located there?',
     ],
   });
@@ -527,7 +552,7 @@ const evaluateJunkDrawerSignals = ({
     clustersWithDeps >= 2 && distinctExternalDepsLens.get(metric).length >= 2;
   const hasMixedDomainTypes = clustersWithDomainTypes >= 2;
   const hasDisjointCallerIslands =
-    clustersWithCallers >= 2 && metric.intraDirectoryEdges === 0;
+    clustersWithCallers >= 2 && isoEdgeCount.unwrap(metric.intraDirectoryEdges) === 0;
   const hasPrematureSingleCallers = singleCallerCount >= 2;
   const hasStructuralHarm =
     hasHeterogeneousDeps ||
@@ -544,19 +569,20 @@ const evaluateJunkDrawerSignals = ({
 const buildJunkDrawerHint =
   ({ dag, options }: RunDagSmellDetectorsInput) =>
   (metric: DirectoryCohesionMetric): O.Option<CrossFileHint> => {
-    const dirMods = RA.filter(isDirRuntimeModule(metric.directory))(
-      Array.from(dag.modules.values()),
+    const dirMods = RA.filter(isDirRuntimeModule(isoDirectoryPath.unwrap(metric.directory)))(
+      listDagModules(dag),
     );
     const involvesTarget = RA.some(isModTarget)(dirMods);
+    const clusterCount = isoClusterCount.unwrap(metric.clusterCount);
     const isFragmented =
-      metric.clusterCount >= Math.max(3, options.minDirModules) ||
-      (metric.clusterCount >= 3 && metric.cohesionScore <= 0.35);
+      clusterCount >= Math.max(3, options.minDirModules) ||
+      (clusterCount >= 3 && isoCohesionScore.unwrap(metric.cohesionScore) <= 0.35);
     const shouldInspect =
-      metric.moduleCount >= options.minDirModules &&
+      isoModuleCount.unwrap(metric.moduleCount) >= options.minDirModules &&
       involvesTarget &&
       !isPureHomogeneousPrimitiveLibrary({ dirMods, metric }) &&
       isFragmented &&
-      metric.averageCallerJaccard < 0.25;
+      isoJaccardScore.unwrap(metric.averageCallerJaccard) < 0.25;
 
     return B.match(
       constant<O.Option<CrossFileHint>>(O.none),
@@ -578,16 +604,16 @@ type MisplacedScopeHintInput = {
 const buildSingleCallerMisplacedHint =
   ({ mod, fnName }: MisplacedScopeHintInput) =>
   (soleCaller: ResolvedModuleData): CrossFileHint => ({
-    hintId: `misplaced-scope-single-caller-${sanitizeIdPart(mod.relativePath)}`,
+    hintId: isoHintId.wrap(`misplaced-scope-single-caller-${sanitizeIdPart(isoRelativePath.unwrap(mod.relativePath))}`),
     category: 'misplaced-scope',
     priority: 'medium',
-    files: [mod.relativePath, soleCaller.relativePath],
+    files: [isoRelativePath.unwrap(mod.relativePath), isoRelativePath.unwrap(soleCaller.relativePath)],
     symbols: [fnName],
-    evidence: `Module "${mod.relativePath}" (in "${mod.directory}") is only called by a single module in another directory: "${soleCaller.relativePath}" (in "${soleCaller.directory}").`,
-    suggestion: `Co-locate "${mod.relativePath}" inside "${soleCaller.directory}/" (or inline it as a private helper in "${soleCaller.relativePath}" if it has no independent domain reuse).`,
+    evidence: `Module "${isoRelativePath.unwrap(mod.relativePath)}" (in "${isoDirectoryPath.unwrap(mod.directory)}") is only called by a single module in another directory: "${isoRelativePath.unwrap(soleCaller.relativePath)}" (in "${isoDirectoryPath.unwrap(soleCaller.directory)}").`,
+    suggestion: `Co-locate "${isoRelativePath.unwrap(mod.relativePath)}" inside "${isoDirectoryPath.unwrap(soleCaller.directory)}/" (or inline it as a private helper in "${isoRelativePath.unwrap(soleCaller.relativePath)}" if it has no independent domain reuse).`,
     suggestedSignature: O.none,
     researchQuestions: [
-      `Is "${fnName}" genuinely a cross-cutting capability, or a premature abstraction only needed by "${soleCaller.directory}"?`,
+      `Is "${fnName}" genuinely a cross-cutting capability, or a premature abstraction only needed by "${isoDirectoryPath.unwrap(soleCaller.directory)}"?`,
     ],
   });
 
@@ -598,16 +624,16 @@ const buildLcaMisplacedHint = ({
   fnName,
   callerRelPaths,
 }: MisplacedScopeHintInput) => ({
-  hintId: `misplaced-scope-lca-${sanitizeIdPart(mod.relativePath)}`,
+  hintId: isoHintId.wrap(`misplaced-scope-lca-${sanitizeIdPart(isoRelativePath.unwrap(mod.relativePath))}`),
   category: 'misplaced-scope' as const,
   priority: 'medium' as const,
-  files: [mod.relativePath, ...callerRelPaths],
+  files: [isoRelativePath.unwrap(mod.relativePath), ...callerRelPaths],
   symbols: [fnName],
-  evidence: `Module "${mod.relativePath}" lives in "${mod.directory}", but all ${nonBarrelCallers.length} callers (${callerRelPaths.join(', ')}) belong exclusively to subtree "${callerLcaDir}/".`,
-  suggestion: `Move "${mod.relativePath}" down to its callers' lowest common ancestor directory "${callerLcaDir}/" to reduce global surface area and improve feature locality.`,
+  evidence: `Module "${isoRelativePath.unwrap(mod.relativePath)}" lives in "${isoDirectoryPath.unwrap(mod.directory)}", but all ${nonBarrelCallers.length} callers (${callerRelPaths.join(', ')}) belong exclusively to subtree "${callerLcaDir}/".`,
+  suggestion: `Move "${isoRelativePath.unwrap(mod.relativePath)}" down to its callers' lowest common ancestor directory "${callerLcaDir}/" to reduce global surface area and improve feature locality.`,
   suggestedSignature: O.none,
   researchQuestions: [
-    `Should "${fnName}" belong to the "${callerLcaDir}" bounded context instead of "${mod.directory}"?`,
+    `Should "${fnName}" belong to the "${callerLcaDir}" bounded context instead of "${isoDirectoryPath.unwrap(mod.directory)}"?`,
   ],
 });
 
@@ -622,7 +648,7 @@ const createMisplacedScopeHint = ({
   nonBarrelCallers,
   callerLcaDir,
 }: CreateMisplacedInput): O.Option<CrossFileHint> => {
-  const fnName = O.getOrElse(() => mod.relativePath)(mod.exportedFunction);
+  const fnName = O.getOrElse(() => isoRelativePath.unwrap(mod.relativePath))(mod.exportedFunction);
   const callerRelPaths = raSort(S.Ord)(RA.map(getModRelativePath)(nonBarrelCallers));
   const hintInput: MisplacedScopeHintInput = {
     mod,
@@ -641,11 +667,11 @@ const buildMisplacedScopeHint =
   (dag: BuiltProjectDag) =>
   (mod: ResolvedModuleData): O.Option<CrossFileHint> => {
     const inModules = RA.filterMap(lookupModule(dag.modules))(
-      getEdgeTargets(dag.runtimeInEdges)(mod.filePath),
+      getEdgeTargets(dag.runtimeInEdges)(isoFilePath.unwrap(mod.filePath)),
     );
     const nonBarrelCallers = RA.filter(isNotBarrelMod)(inModules);
     const isReExportedByBarrel = RA.some(isBarrelMod)(inModules);
-    const involvesTarget = mod.isTarget || RA.some(isModTarget)(nonBarrelCallers);
+    const involvesTarget = mod.scope === 'target' || RA.some(isModTarget)(nonBarrelCallers);
     const callerDirs = RA.map(getModDirectory)(nonBarrelCallers);
     const callerLcaDir = computeDirectoryLca(callerDirs);
 
@@ -655,8 +681,8 @@ const buildMisplacedScopeHint =
       involvesTarget &&
       !isReExportedByBarrel &&
       callerLcaDir !== '.' &&
-      !isAncestorDir({ ancestor: callerLcaDir, descendant: mod.directory }) &&
-      !callerDirs.includes(mod.directory);
+      !isAncestorDir({ ancestor: callerLcaDir, descendant: isoDirectoryPath.unwrap(mod.directory) }) &&
+      !callerDirs.includes(isoDirectoryPath.unwrap(mod.directory));
 
     return B.match(
       constant<O.Option<CrossFileHint>>(O.none),
@@ -665,17 +691,17 @@ const buildMisplacedScopeHint =
   };
 
 const detectMisplacedScope = (dag: BuiltProjectDag) =>
-  RA.filterMap(buildMisplacedScopeHint(dag))(Array.from(dag.modules.values()));
+  RA.filterMap(buildMisplacedScopeHint(dag))(listDagModules(dag));
 
 const getDomainExternalDeps = (m: ResolvedModuleData) => m.domainExternalDependencies;
 
-type TransitiveStepCtx = {
+type TransitiveStepInput = {
   readonly dag: BuiltProjectDag;
   readonly state: TransitiveDepsState;
 };
 
 const processTransitiveNode =
-  ({ dag, state }: TransitiveStepCtx) =>
+  ({ dag, state }: TransitiveStepInput) =>
   (curr: string): readonly [ReadonlyArray<string>, TransitiveDepsState] => {
     const deps = O.match(
       constant<ReadonlyArray<string>>([]),
@@ -711,16 +737,16 @@ const checkDifferentDir =
   (targetMod: ResolvedModuleData): O.Option<string> =>
     B.match(
       constant<O.Option<string>>(O.none),
-      constant<O.Option<string>>(O.some(targetMod.directory)),
-    )(targetMod.directory !== currentDir);
+      constant<O.Option<string>>(O.some(isoDirectoryPath.unwrap(targetMod.directory))),
+    )(isoDirectoryPath.unwrap(targetMod.directory) !== currentDir);
 
-type OutDirCtx = {
+type OutDirInput = {
   readonly currentDir: string;
   readonly modules: ReadonlyMap<string, ResolvedModuleData>;
 };
 
 const getOutDirectoryIfDifferent =
-  ({ currentDir, modules }: OutDirCtx) =>
+  ({ currentDir, modules }: OutDirInput) =>
   (targetFile: string) =>
     O.chain(checkDifferentDir(currentDir))(lookupModule(modules)(targetFile));
 
@@ -741,7 +767,7 @@ const createHubBottleneckHint = ({
   outDirs,
   hasHeavyDirectDeps,
 }: HubPayloadInput): O.Option<CrossFileHint> => {
-  const fnName = O.getOrElse(() => mod.relativePath)(mod.exportedFunction);
+  const fnName = O.getOrElse(() => isoRelativePath.unwrap(mod.relativePath))(mod.exportedFunction);
   const extList = raSort(S.Ord)(Array.from(transitiveExtDeps));
   const outDirList = raSort(S.Ord)(Array.from(outDirs));
   const extPart = B.match(
@@ -762,12 +788,12 @@ const createHubBottleneckHint = ({
   )(extList.length > 0);
 
   return O.some({
-    hintId: `hub-bottleneck-${sanitizeIdPart(mod.relativePath)}`,
+    hintId: isoHintId.wrap(`hub-bottleneck-${sanitizeIdPart(isoRelativePath.unwrap(mod.relativePath))}`),
     category: 'hub-bottleneck',
     priority,
-    files: [mod.relativePath, ...raSort(S.Ord)(RA.map(getModRelativePath)(callers))],
+    files: [isoRelativePath.unwrap(mod.relativePath), ...raSort(S.Ord)(RA.map(getModRelativePath)(callers))],
     symbols: [fnName],
-    evidence: `Module "${mod.relativePath}" is a coupling hub with fan-in=${callers.length}, out-degree=${node.outDegree}, transitive dependencies=${node.transitiveDependencyCount}${extPart}${outDirsPart}.`,
+    evidence: `Module "${isoRelativePath.unwrap(mod.relativePath)}" is a coupling hub with fan-in=${callers.length}, out-degree=${node.outDegree}, transitive dependencies=${node.transitiveDependencyCount}${extPart}${outDirsPart}.`,
     suggestion:
       'Decouple this hub by separating pure domain transformations (zero I/O fan-out) from external adapter integrations, or inject dependencies via Reader/ReaderTaskEither.',
     suggestedSignature: O.none,
@@ -792,17 +818,18 @@ const evaluateHubBottleneck = ({
   callers,
 }: EvaluateHubInput): O.Option<CrossFileHint> => {
   const transitiveExtDeps = collectTransitiveDomainDeps({
-    startFile: mod.filePath,
+    startFile: isoFilePath.unwrap(mod.filePath),
     dag,
   });
   const outDirs = new Set(
-    RA.filterMap(getOutDirectoryIfDifferent({ currentDir: mod.directory, modules: dag.modules }))(
-      getEdgeTargets(dag.runtimeOutEdges)(mod.filePath),
+    RA.filterMap(getOutDirectoryIfDifferent({ currentDir: isoDirectoryPath.unwrap(mod.directory), modules: dag.modules }))(
+      getEdgeTargets(dag.runtimeOutEdges)(isoFilePath.unwrap(mod.filePath)),
     ),
   );
   const hasHeavyDirectDeps = mod.domainExternalDependencies.length >= 3;
   const hasHeavyTransitiveDeps = transitiveExtDeps.size >= 4;
-  const hasWideCrossDirFanOut = outDirs.size >= 3 && node.transitiveDependencyCount >= 4;
+  const hasWideCrossDirFanOut =
+    outDirs.size >= 3 && isoDependencyCount.unwrap(node.transitiveDependencyCount) >= 4;
   const isBottleneck =
     hasHeavyDirectDeps || hasHeavyTransitiveDeps || hasWideCrossDirFanOut;
 
@@ -820,7 +847,7 @@ const evaluateHubBottleneck = ({
   )(isBottleneck);
 };
 
-type HubCandidateCtx = {
+type HubCandidateInput = {
   readonly dag: BuiltProjectDag;
   readonly mod: ResolvedModuleData;
   readonly callers: ReadonlyArray<ResolvedModuleData>;
@@ -828,10 +855,10 @@ type HubCandidateCtx = {
 };
 
 const checkHubCandidate =
-  ({ dag, mod, callers, involvesTarget }: HubCandidateCtx) =>
+  ({ dag, mod, callers, involvesTarget }: HubCandidateInput) =>
   (node: ProjectModuleNode): O.Option<CrossFileHint> => {
     const isCandidate =
-      isRuntimeMod(mod) && !node.isEntrypoint && involvesTarget && callers.length >= 3;
+      isRuntimeMod(mod) && node.role !== 'entrypoint' && involvesTarget && callers.length >= 3;
     return B.match(
       constant<O.Option<CrossFileHint>>(O.none),
       () => evaluateHubBottleneck({ dag, mod, node, callers }),
@@ -841,17 +868,17 @@ const checkHubCandidate =
 const buildHubBottleneckHint =
   (dag: BuiltProjectDag) =>
   (mod: ResolvedModuleData): O.Option<CrossFileHint> => {
-    const nodeOpt = RM.lookup(S.Eq)(mod.filePath)(dag.nodeByFile);
+    const nodeOpt = RM.lookup(S.Eq)(isoFilePath.unwrap(mod.filePath))(dag.nodeByFile);
     const callers = RA.filter(isNotBarrelMod)(
-      RA.filterMap(lookupModule(dag.modules))(getEdgeTargets(dag.runtimeInEdges)(mod.filePath)),
+      RA.filterMap(lookupModule(dag.modules))(getEdgeTargets(dag.runtimeInEdges)(isoFilePath.unwrap(mod.filePath))),
     );
-    const involvesTarget = mod.isTarget || RA.some(isModTarget)(callers);
+    const involvesTarget = mod.scope === 'target' || RA.some(isModTarget)(callers);
 
     return O.chain(checkHubCandidate({ dag, mod, callers, involvesTarget }))(nodeOpt);
   };
 
 const detectHubBottlenecks = (dag: BuiltProjectDag) =>
-  RA.filterMap(buildHubBottleneckHint(dag))(Array.from(dag.modules.values()));
+  RA.filterMap(buildHubBottleneckHint(dag))(listDagModules(dag));
 
 export const runDagSmellDetectors = (({ dag, options }: RunDagSmellDetectorsInput) => [
   ...detectDependencyCycles(dag),

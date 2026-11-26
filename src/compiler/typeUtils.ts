@@ -1,12 +1,25 @@
 import { constant, flow, identity } from 'fp-ts/lib/function.js';
 import * as B from 'fp-ts/lib/boolean.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import { Lens } from 'monocle-ts';
+import { iso } from 'newtype-ts';
 import * as ts from 'typescript';
 import { match, P } from 'ts-pattern';
-import type { SourceLocation, TypeInspector } from '../model/report.js';
+import type {
+  CodeSnippet,
+  ColumnNumber,
+  LineNumber,
+  SourceLocation,
+  TypeInspector,
+} from '../model/report.js';
+
+const isoLine = iso<LineNumber>();
+const isoCol = iso<ColumnNumber>();
+const isoSnippet = iso<CodeSnippet>();
 
 export type CreateTypeInspector = (checker: ts.TypeChecker) => TypeInspector;
 
@@ -26,10 +39,10 @@ const getPosLineChar = (sf: ts.SourceFile) => (pos: number) =>
   sf.getLineAndCharacterOfPosition(pos);
 
 const makeLocation = (sf: ts.SourceFile) => (node: ts.Node): SourceLocation => ({
-  line: getPosLineChar(sf)(node.getStart(sf)).line + 1,
-  column: getPosLineChar(sf)(node.getStart(sf)).character + 1,
-  endLine: getPosLineChar(sf)(node.getEnd()).line + 1,
-  endColumn: getPosLineChar(sf)(node.getEnd()).character + 1,
+  line: isoLine.wrap(getPosLineChar(sf)(node.getStart(sf)).line + 1),
+  column: isoCol.wrap(getPosLineChar(sf)(node.getStart(sf)).character + 1),
+  endLine: isoLine.wrap(getPosLineChar(sf)(node.getEnd()).line + 1),
+  endColumn: isoCol.wrap(getPosLineChar(sf)(node.getEnd()).character + 1),
 });
 
 const getNodeText = (sf: ts.SourceFile) => (node: ts.Node) => node.getText(sf);
@@ -46,26 +59,29 @@ const makeSnippet = (sf: ts.SourceFile) =>
     getNodeText(sf),
     collapseWhitespace,
     truncate80,
+    isoSnippet.wrap,
   );
 
-const unwrapSatisfies = (e: ts.SatisfiesExpression) =>
-  unwrapSatisfiesAndParens(e.expression);
+const unwrapStepExpr = (e: ts.SatisfiesExpression | ts.ParenthesizedExpression) =>
+  [e.expression, e.expression] as const;
 
-const unwrapParens = (e: ts.ParenthesizedExpression) =>
-  unwrapSatisfiesAndParens(e.expression);
+const isSatisfiesOrParen = (
+  expr: ts.Expression,
+): expr is ts.SatisfiesExpression | ts.ParenthesizedExpression =>
+  ts.isSatisfiesExpression(expr) || ts.isParenthesizedExpression(expr);
 
-const unwrapSatisfiesAndParens = (expr: ts.Expression): ts.Expression =>
-  match(expr)
-    .when(ts.isSatisfiesExpression, unwrapSatisfies)
-    .when(ts.isParenthesizedExpression, unwrapParens)
-    .otherwise(identity);
+const stepSatisfiesOrParen = (expr: ts.Expression) =>
+  O.map(unwrapStepExpr)(O.fromPredicate(isSatisfiesOrParen)(expr));
+
+const unwrapSatisfiesAndParens = (expr: ts.Expression) =>
+  O.getOrElse(constant(expr))(RA.last(RA.unfold(expr, stepSatisfiesOrParen)));
 
 const readSymbolName = (s: ts.Symbol) => s.getName();
 const getSymbolNameOpt = O.map(readSymbolName);
 
 const getDeclSourceFileName = (d: ts.Declaration) => d.getSourceFile().fileName;
 const getFirstDecl = (sym: ts.Symbol) =>
-  O.chain(RA.head)(O.fromNullable(sym.declarations));
+  O.chain(RA.head)(liftNullable(sym.declarations));
 const getFirstDeclFile = flow(getFirstDecl, O.map(getDeclSourceFileName));
 
 const includesFragment = (fragment: string) => (file: string) => file.includes(fragment);
@@ -77,7 +93,7 @@ const matchesFpTsSymbol = (name: string) => (sym: ts.Symbol) =>
   sym.getName() === name && symbolFrom('fp-ts')(sym);
 
 const isFpTsFunctionSymbol = ({ name, checker }: CheckerName) => (expr: ts.Expression) =>
-  O.exists(matchesFpTsSymbol(name))(O.fromNullable(checker.getSymbolAtLocation(expr)));
+  O.exists(matchesFpTsSymbol(name))(liftNullable(checker.getSymbolAtLocation(expr)));
 
 const isCallNamed = ({ name, checker }: CheckerName) => (node: ts.Node) =>
   ts.isCallExpression(node) &&
@@ -85,7 +101,7 @@ const isCallNamed = ({ name, checker }: CheckerName) => (node: ts.Node) =>
     (ts.isIdentifier(node.expression) && node.expression.text === name));
 
 const getEffectiveSymbol = (t: ts.Type): O.Option<ts.Symbol> =>
-  O.alt(constant(O.fromNullable(t.getSymbol())))(O.fromNullable(t.aliasSymbol));
+  O.alt(constant(liftNullable(t.getSymbol())))(liftNullable(t.aliasSymbol));
 
 const getTypeSymbolName = flow(getEffectiveSymbol, getSymbolNameOpt);
 
@@ -130,7 +146,7 @@ const isNewtypeAlias = (sym: ts.Symbol) =>
 const isUriProp = (prop: ts.Symbol) => prop.getName() === '_URI';
 
 const isNewtypeBrand = (_checker: ts.TypeChecker) => (type: ts.Type): boolean =>
-  O.exists(isNewtypeAlias)(O.fromNullable(type.aliasSymbol)) ||
+  O.exists(isNewtypeAlias)(liftNullable(type.aliasSymbol)) ||
   RA.some(isUriProp)(type.getProperties());
 
 const isTsPatternMatchCall = (node: ts.Node) =>
@@ -138,8 +154,10 @@ const isTsPatternMatchCall = (node: ts.Node) =>
   ts.isPropertyAccessExpression(node.expression) &&
   propAccessNameText.get(node.expression) === 'exhaustive';
 
+const hasVoidFlag = (t: ts.Type) => (t.flags & ts.TypeFlags.Void) !== 0;
+
 const isNullOrUndefinedFlag = (t: ts.Type) =>
-  (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+  (t.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 || hasVoidFlag(t);
 
 const isContainerName = (name: string) =>
   RA.elem(S.Eq)(name)([
@@ -160,7 +178,7 @@ const isOptionOrEffectContainer = (t: ts.Type) =>
   O.exists(isContainerName)(getTypeSymbolName(t));
 
 const isVoidCallReturn = (type: ts.Type) =>
-  (type.flags & ts.TypeFlags.Void) !== 0 && RA.isNonEmpty(type.getCallSignatures());
+  hasVoidFlag(type) && RA.isNonEmpty(type.getCallSignatures());
 
 const isUnionType = (t: ts.Type) => t.isUnion();
 
@@ -171,15 +189,12 @@ const getUnionMembers = (t: ts.Type) =>
     .when(isUnionType, readUnionMembers)
     .otherwise(constant(RA.empty));
 
-const foundPair = (rest: ReadonlyArray<ts.Type>): readonly [boolean, ReadonlyArray<ts.Type>] => [
-  true,
-  rest,
-];
+const makeNullablePair = (step: 'found' | 'continue') => (rest: ReadonlyArray<ts.Type>) =>
+  [step === 'found', rest] as const;
 
-const continuePair = (rest: ReadonlyArray<ts.Type>): readonly [boolean, ReadonlyArray<ts.Type>] => [
-  false,
-  rest,
-];
+const foundPair = makeNullablePair('found');
+
+const continuePair = makeNullablePair('continue');
 
 const stepNullableHead =
   (tail: ReadonlyArray<ts.Type>) =>

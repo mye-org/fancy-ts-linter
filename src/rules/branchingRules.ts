@@ -1,8 +1,15 @@
 import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
-import type { DiagnosticError, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { DiagnosticError, RuleContext, DiagnosticMessage, FixGuidance, RuleId } from '../model/report.js';
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
@@ -28,13 +35,12 @@ type BranchErrorInput = {
 
 const makeBranchError =
   (ctx: RuleContext) =>
-  ({ ruleId, node, message, fixGuidance }: BranchErrorInput): DiagnosticError => ({
-    ruleId,
+  ({ ruleId, node, message, fixGuidance }: BranchErrorInput): DiagnosticError => ({    ruleId: isoRuleId.wrap(ruleId),
     category: 'branching',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const toNoTernaryError = (ctx: RuleContext) => (n: ts.ConditionalExpression) =>
@@ -82,7 +88,7 @@ const isTsPatternMatchRoot = (ctx: RuleContext) => (n: ts.Node) =>
   ts.isCallExpression(n) &&
   ts.isIdentifier(n.expression) &&
   n.expression.text === 'match' &&
-  O.exists(isTsPatternSymbol)(O.fromNullable(ctx.checker.getSymbolAtLocation(n.expression)));
+  O.exists(isTsPatternSymbol)(liftNullable(ctx.checker.getSymbolAtLocation(n.expression)));
 
 const isPropAccessOfNode =
   (node: ts.Node) =>
@@ -94,10 +100,10 @@ const toMethodCallPair =
   (call: ts.CallExpression): readonly [string, ts.CallExpression] => [prop.name.text, call];
 
 const extractParentCall = (prop: ts.PropertyAccessExpression) =>
-  O.map(toMethodCallPair(prop))(O.filter(ts.isCallExpression)(O.fromNullable(prop.parent)));
+  O.map(toMethodCallPair(prop))(O.filter(ts.isCallExpression)(liftNullable(prop.parent)));
 
 const stepChainedCall = (node: ts.Node) =>
-  O.chain(extractParentCall)(O.filter(isPropAccessOfNode(node))(O.fromNullable(node.parent)));
+  O.chain(extractParentCall)(O.filter(isPropAccessOfNode(node))(liftNullable(node.parent)));
 
 const isTerminalMethod = (name: string) =>
   name === 'exhaustive' || name === 'run' || name === 'otherwise';

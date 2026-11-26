@@ -1,5 +1,6 @@
 import type * as ts from 'typescript';
-import type { BuiltProjectDag, CrossFileHint } from '../model/projectReport.js';
+import { iso } from 'newtype-ts';
+import type { OccurrenceCount, BuiltProjectDag, CrossFileHint } from '../model/projectReport.js';
 import type { TypeInspector } from '../model/report.js';
 import { discoverArchitecturalMotifs } from './architecturalMotifDiscovery.js';
 import { discoverEnvThreading } from './envThreadingDiscovery.js';

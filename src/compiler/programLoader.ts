@@ -2,11 +2,30 @@ import { constant, flow } from 'fp-ts/lib/function.js';
 import * as B from 'fp-ts/lib/boolean.js';
 import * as E from 'fp-ts/lib/Either.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
+import { iso } from 'newtype-ts';
 import * as path from 'node:path';
 import * as ts from 'typescript';
-import type { DiagnosticError, SourceLocation } from '../model/report.js';
+import type {
+  CodeSnippet,
+  ColumnNumber,
+  DiagnosticError,
+  DiagnosticMessage,
+  FixGuidance,
+  LineNumber,
+  RuleId,
+  SourceLocation,
+} from '../model/report.js';
+
+const isoLine = iso<LineNumber>();
+const isoCol = iso<ColumnNumber>();
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoSnippet = iso<CodeSnippet>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type LoadProgramInput = {
   readonly filePaths: ReadonlyArray<string>;
@@ -39,7 +58,7 @@ type DiagContext = {
 };
 
 const findConfigFromFile = (filePath: string): O.Option<string> =>
-  O.fromNullable(
+  liftNullable(
     ts.findConfigFile(path.dirname(filePath), ts.sys.fileExists, 'tsconfig.json'),
   );
 
@@ -66,7 +85,7 @@ const parseRawTsConfig =
           ts.parseJsonConfigFileContent(res.config, ts.sys, path.dirname(configPath)),
         ),
       formatReadConfigError(configPath),
-    )(O.fromNullable(res.error));
+    )(liftNullable(res.error));
 
 const readRawTsConfig = (configPath: string) =>
   ts.readConfigFile(configPath, ts.sys.readFile);
@@ -136,13 +155,13 @@ const buildProgramWith =
     )(filePaths);
 
 const getDiagLength = (diag: ts.Diagnostic) =>
-  O.getOrElse(constant(0))(O.fromNullable(diag.length));
+  O.getOrElse(constant(0))(liftNullable(diag.length));
 
 const lineCharFromPositions = ({ sf, startPos, endPos }: LineCharInput) => ({
-  line: sf.getLineAndCharacterOfPosition(startPos).line + 1,
-  column: sf.getLineAndCharacterOfPosition(startPos).character + 1,
-  endLine: sf.getLineAndCharacterOfPosition(endPos).line + 1,
-  endColumn: sf.getLineAndCharacterOfPosition(endPos).character + 1,
+  line: isoLine.wrap(sf.getLineAndCharacterOfPosition(startPos).line + 1),
+  column: isoCol.wrap(sf.getLineAndCharacterOfPosition(startPos).character + 1),
+  endLine: isoLine.wrap(sf.getLineAndCharacterOfPosition(endPos).line + 1),
+  endColumn: isoCol.wrap(sf.getLineAndCharacterOfPosition(endPos).character + 1),
 });
 
 const diagLocationFromStart =
@@ -154,9 +173,14 @@ const toDiagnosticLocation =
   (sf: ts.SourceFile) =>
   (diag: ts.Diagnostic): SourceLocation =>
     O.match(
-      constant({ line: 1, column: 1, endLine: 1, endColumn: 1 }),
+      () => ({
+        line: isoLine.wrap(1),
+        column: isoCol.wrap(1),
+        endLine: isoLine.wrap(1),
+        endColumn: isoCol.wrap(1),
+      }),
       diagLocationFromStart({ sf, diag }),
-    )(O.fromNullable(diag.start));
+    )(liftNullable(diag.start));
 
 const sliceSnippet =
   ({ sf, len }: { readonly sf: ts.SourceFile; readonly len: number }) =>
@@ -168,21 +192,23 @@ const sliceSnippet =
 
 const formatDiagSnippet =
   (sf: ts.SourceFile) =>
-  (diag: ts.Diagnostic): string =>
-    O.match(
-      constant(''),
-      sliceSnippet({ sf, len: O.getOrElse(constant(40))(O.fromNullable(diag.length)) }),
-    )(O.fromNullable(diag.start));
+  (diag: ts.Diagnostic): CodeSnippet =>
+    isoSnippet.wrap(
+      O.match(
+        constant(''),
+        sliceSnippet({ sf, len: O.getOrElse(constant(40))(liftNullable(diag.length)) }),
+      )(liftNullable(diag.start)),
+    );
 
 const mapTscDiagnostic =
   (sf: ts.SourceFile) =>
   (diag: ts.Diagnostic): DiagnosticError => ({
-    ruleId: `TS${diag.code}`,
+    ruleId: isoRuleId.wrap(`TS${diag.code}`),
     category: 'tsc',
     location: toDiagnosticLocation(sf)(diag),
-    message: ts.flattenDiagnosticMessageText(diag.messageText, ' '),
+    message: isoDiagMsg.wrap(ts.flattenDiagnosticMessageText(diag.messageText, ' ')),
     snippet: formatDiagSnippet(sf)(diag),
-    fixGuidance: 'Resolve the TypeScript compiler diagnostic.',
+    fixGuidance: isoFixGuidance.wrap('Resolve the TypeScript compiler diagnostic.'),
   });
 
 const collectTscErrorsForFile =

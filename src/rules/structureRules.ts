@@ -3,10 +3,22 @@ import { constant, flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
+import { iso } from 'newtype-ts';
 import * as ts from 'typescript';
-import type { BindingInfo, DiagnosticError, RuleContext } from '../model/report.js';
+import type {
+  BindingInfo,
+  DiagnosticError,
+  DiagnosticMessage,
+  FixGuidance,
+  RuleContext,
+  RuleId,
+} from '../model/report.js';
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 const sourceFileStatementsLens = Lens.fromPath<RuleContext>()(['sourceFile', 'statements']);
 
@@ -37,12 +49,12 @@ type StructureErrorInput = {
 const makeStructureError =
   (ctx: RuleContext) =>
   ({ ruleId, category, node, message, fixGuidance }: StructureErrorInput): DiagnosticError => ({
-    ruleId,
+    ruleId: isoRuleId.wrap(ruleId),
     category,
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const toZeroExportsError = (ctx: RuleContext) => [
@@ -116,6 +128,32 @@ const checkBindingFnKind = (ctx: RuleContext) => (b: BindingInfo) =>
     constant(RA.empty),
   )(isAllowedExportKind(b.kind));
 
+const pairSame = <A>(a: A) => [a, a] as const;
+
+const pairParenExpr = (p: ts.ParenthesizedExpression) => pairSame(p.expression);
+
+const stepParen = (expr: ts.Expression) =>
+  O.map(pairParenExpr)(O.fromPredicate(ts.isParenthesizedExpression)(expr));
+
+const unwrapParens = (expr: ts.Expression) =>
+  O.getOrElse(constant(expr))(RA.last(RA.unfold(expr, stepParen)));
+
+const getSatisfiesNode = (b: BindingInfo) =>
+  O.chain(flow(unwrapParens, O.fromPredicate(ts.isSatisfiesExpression)))(b.initializer);
+
+const hasCallSignature = (t: ts.Type) => RA.isNonEmpty(t.getCallSignatures());
+
+const satisfiesSpecifiesFnType =
+  (ctx: RuleContext) =>
+  (node: ts.SatisfiesExpression) =>
+    hasCallSignature(ctx.checker.getTypeFromTypeNode(node.type));
+
+const hasBindingSatisfies = (b: BindingInfo) =>
+  b.annotation === 'satisfies' || b.annotation === 'both';
+
+const hasValidSatisfiesType = (ctx: RuleContext) => (b: BindingInfo) =>
+  hasBindingSatisfies(b) && O.exists(satisfiesSpecifiesFnType(ctx))(getSatisfiesNode(b));
+
 const checkBindingSatisfies = (ctx: RuleContext) => (b: BindingInfo) =>
   B.match(
     (): ReadonlyArray<DiagnosticError> => [
@@ -123,19 +161,20 @@ const checkBindingSatisfies = (ctx: RuleContext) => (b: BindingInfo) =>
         ruleId: 'export-requires-satisfies',
         category: 'export-satisfies',
         node: b.declaration,
-        message: `Exported function \`${b.name}\` must use the \`satisfies\` keyword to pin its type contract.`,
-        fixGuidance: 'Append `satisfies ExportedFnType` after the exported function.',
+        message: `Exported function \`${b.name}\` must use the \`satisfies\` keyword to specify its function type and return type.`,
+        fixGuidance:
+          'Append `satisfies ExportedFnType` (e.g. `(input: Input) => Output`) after the exported function.',
       }),
     ],
     constant(RA.empty),
-  )(b.hasSatisfies);
+  )(hasValidSatisfiesType(ctx)(b));
 
 const checkExportedBinding = (ctx: RuleContext) => (b: BindingInfo) => [
   ...checkBindingFnKind(ctx)(b),
   ...checkBindingSatisfies(ctx)(b),
 ];
 
-const isExportedBinding = (b: BindingInfo) => b.isExported;
+const isExportedBinding = (b: BindingInfo) => b.visibility === 'exported';
 
 const checkExportedFunctionAndSatisfies = (ctx: RuleContext) =>
   RA.chain(checkExportedBinding(ctx))(RA.filter(isExportedBinding)(irBindingsLens.get(ctx)));
@@ -166,7 +205,8 @@ const checkDisallowedTopLevelStatements = (ctx: RuleContext) =>
     RA.map(toDisallowedStatementError(ctx)),
   )(sourceFileStatementsLens.get(ctx));
 
-const isDisallowedOtherBinding = (b: BindingInfo) => !b.isExported && b.kind === 'other';
+const isDisallowedOtherBinding = (b: BindingInfo) =>
+  b.visibility !== 'exported' && b.kind === 'other';
 
 const toDisallowedOtherBindingError = (ctx: RuleContext) => (b: BindingInfo) =>
   makeStructureError(ctx)({

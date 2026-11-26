@@ -1,10 +1,17 @@
 import * as B from 'fp-ts/lib/boolean.js';
 import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { DiagnosticError, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { DiagnosticError, RuleContext, DiagnosticMessage, FixGuidance, RuleId } from '../model/report.js';
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
@@ -35,13 +42,12 @@ type PfErrorInput = {
 
 const makePfError =
   (ctx: RuleContext) =>
-  ({ ruleId, node, message, fixGuidance }: PfErrorInput): DiagnosticError => ({
-    ruleId,
+  ({ ruleId, node, message, fixGuidance }: PfErrorInput): DiagnosticError => ({    ruleId: isoRuleId.wrap(ruleId),
     category: 'point-free',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const dupParenExpr = (expr: ts.ParenthesizedExpression) =>
@@ -61,12 +67,12 @@ const dupNode = (n: ts.Node) => [n, n] as const;
 
 const nextCurriedParent = (cur: ts.Node) =>
   O.map(dupNode)(
-    O.chain(O.fromPredicate(isCurriedWrapperParent(cur)))(O.fromNullable(cur.parent)),
+    O.chain(O.fromPredicate(isCurriedWrapperParent(cur)))(liftNullable(cur.parent)),
   );
 
 const isTopLevelCurriedArrow = (node: ts.Node) => {
   const top = O.getOrElse(() => node)(RA.last(RA.unfold(node, nextCurriedParent)));
-  return O.exists(ts.isVariableDeclaration)(O.fromNullable(top.parent));
+  return O.exists(ts.isVariableDeclaration)(liftNullable(top.parent));
 };
 
 const dupPropExpr = (expr: ts.PropertyAccessExpression) =>
@@ -89,10 +95,12 @@ const getIdentifierParamName = (arrow: ts.ArrowFunction) =>
 const isSingleExprArrow = (arrow: ts.ArrowFunction) =>
   paramLengthLens.get(arrow) === 1 && !ts.isBlock(arrow.body);
 
+const getParamNameText = (name: ts.Identifier) => name.text;
+
 const isTrivialProjectionBody = (arrow: ts.ArrowFunction) => (param: ts.ParameterDeclaration) =>
   ts.isIdentifier(param.name) &&
   !ts.isBlock(arrow.body) &&
-  isPropertyChainOn(param.name.text)(unwrapParens(arrow.body));
+  isPropertyChainOn(getParamNameText(param.name))(unwrapParens(arrow.body));
 
 const isTrivialProjection = (arrow: ts.ArrowFunction) =>
   isSingleExprArrow(arrow) && O.exists(isTrivialProjectionBody(arrow))(getIdentifierParamName(arrow));
@@ -123,14 +131,22 @@ const isSimpleLeafExpr = (paramName: string) => (e: ts.Expression) =>
   (ts.isPropertyAccessExpression(e) &&
     (isPropertyChainOn(paramName)(e) || ts.isIdentifier(e.expression)));
 
+const callArgCount = (c: ts.CallExpression) => c.arguments.length;
+
+const isExclamationOp = (e: ts.PrefixUnaryExpression) =>
+  e.operator === ts.SyntaxKind.ExclamationToken;
+
 const isSimplePrefixOp = (e: ts.PrefixUnaryExpression) =>
-  e.operator === ts.SyntaxKind.ExclamationToken || e.operator === ts.SyntaxKind.MinusToken;
+  isExclamationOp(e) || e.operator === ts.SyntaxKind.MinusToken;
 
 const isSimplePrefixNode = (e: ts.Expression): e is ts.PrefixUnaryExpression =>
   ts.isPrefixUnaryExpression(e) && isSimplePrefixOp(e);
 
+const isComparisonOrLogicBinary = (e: ts.BinaryExpression) =>
+  isComparisonOrLogicOp(e.operatorToken.kind);
+
 const isSimpleBinaryNode = (e: ts.Expression): e is ts.BinaryExpression =>
-  ts.isBinaryExpression(e) && isComparisonOrLogicOp(e.operatorToken.kind);
+  ts.isBinaryExpression(e) && isComparisonOrLogicBinary(e);
 
 const expandSimplePrefix = (tail: ReadonlyArray<ts.Expression>) => (e: ts.PrefixUnaryExpression) =>
   [true, [e.operand, ...tail]] as const;
@@ -158,17 +174,17 @@ const isSimpleValueExpr = (paramName: string) => (expr: ts.Expression) =>
 
 const isTrivialPredicateExpr = (paramName: string) => (body: ts.Expression) =>
   (ts.isBinaryExpression(body) &&
-    isComparisonOrLogicOp(body.operatorToken.kind) &&
+    isComparisonOrLogicBinary(body) &&
     isSimpleValueExpr(paramName)(body.left) &&
     isSimpleValueExpr(paramName)(body.right)) ||
   (ts.isPrefixUnaryExpression(body) &&
-    body.operator === ts.SyntaxKind.ExclamationToken &&
+    isExclamationOp(body) &&
     isSimpleValueExpr(paramName)(body.operand));
 
 const isTrivialPredicateBody = (arrow: ts.ArrowFunction) => (param: ts.ParameterDeclaration) =>
   ts.isIdentifier(param.name) &&
   !ts.isBlock(arrow.body) &&
-  isTrivialPredicateExpr(param.name.text)(unwrapParens(arrow.body));
+  isTrivialPredicateExpr(getParamNameText(param.name))(unwrapParens(arrow.body));
 
 const isTrivialPredicate = (arrow: ts.ArrowFunction) =>
   isSingleExprArrow(arrow) && O.exists(isTrivialPredicateBody(arrow))(getIdentifierParamName(arrow));
@@ -199,7 +215,7 @@ const isLazyBranchCallParent = (parent: ts.Node) =>
 const isLazyBranchThunk = (arrow: ts.ArrowFunction) =>
   paramLengthLens.get(arrow) === 0 &&
   !ts.isBlock(arrow.body) &&
-  O.exists(isLazyBranchCallParent)(O.fromNullable(arrow.parent));
+  O.exists(isLazyBranchCallParent)(liftNullable(arrow.parent));
 
 const isAllowedInlineArrow = (n: ts.ArrowFunction | ts.FunctionExpression) =>
   ts.isArrowFunction(n) &&
@@ -268,7 +284,7 @@ const countCurryDepth = (arrow: ts.ArrowFunction) =>
 const isCurriedChainRoot = (n: ts.Node): n is ts.ArrowFunction =>
   ts.isArrowFunction(n) &&
   isTopLevelCurriedArrow(n) &&
-  !O.exists(ts.isArrowFunction)(O.fromNullable(n.parent));
+  !O.exists(ts.isArrowFunction)(liftNullable(n.parent));
 
 const isOverMaxCurryDepth = (n: ts.Node): n is ts.ArrowFunction =>
   isCurriedChainRoot(n) && countCurryDepth(n) > 3;
@@ -291,7 +307,7 @@ const isExternalDeclaration = (d: ts.Declaration) =>
   d.getSourceFile().fileName.includes('node_modules') || d.getSourceFile().isDeclarationFile;
 
 const getFirstDeclaration = (sym: ts.Symbol) =>
-  O.chain(RA.head)(O.fromNullable(sym.declarations));
+  O.chain(RA.head)(liftNullable(sym.declarations));
 
 const isExternalSymbol = flow(getFirstDeclaration, O.exists(isExternalDeclaration));
 
@@ -302,16 +318,16 @@ const isWithOrWhenCall = (expr: ts.Expression) =>
 const isExemptMultiArgCallee = (ctx: RuleContext) => (call: ts.CallExpression) =>
   ctx.inspector.isFlowCall(call) ||
   isWithOrWhenCall(call.expression) ||
-  O.exists(isExternalSymbol)(O.fromNullable(ctx.checker.getSymbolAtLocation(call.expression)));
+  O.exists(isExternalSymbol)(liftNullable(ctx.checker.getSymbolAtLocation(call.expression)));
 
 const isForbiddenMultiArgCall = (ctx: RuleContext) => (n: ts.Node): n is ts.CallExpression =>
-  ts.isCallExpression(n) && n.arguments.length > 1 && !isExemptMultiArgCallee(ctx)(n);
+  ts.isCallExpression(n) && callArgCount(n) > 1 && !isExemptMultiArgCallee(ctx)(n);
 
 const makeCallArityError = (ctx: RuleContext) => (n: ts.CallExpression) =>
   makePfError(ctx)({
     ruleId: 'unary-arity-only',
     node: n,
-    message: `Multi-argument call (${n.arguments.length} args) violates unary-arity rule.`,
+    message: `Multi-argument call (${callArgCount(n)} args) violates unary-arity rule.`,
     fixGuidance:
       'Refactor the target function to take a single named Input/Domain Record (`f({ ... })`), or at most a 2-level curry (`f(config)(input)`) if partially applied.',
   });
@@ -343,27 +359,39 @@ const hasModuleSymbolFlag = (sym: ts.Symbol) =>
 
 const isNamespaceReceiver = (checker: ts.TypeChecker) => (expr: ts.Expression) =>
   O.exists(flow(resolveAliasedSymbol(checker), hasModuleSymbolFlag))(
-    O.fromNullable(checker.getSymbolAtLocation(expr)),
+    liftNullable(checker.getSymbolAtLocation(expr)),
   );
 
 const isMethodBindingWrapper = (checker: ts.TypeChecker) => (callee: ts.Expression) =>
   ts.isPropertyAccessExpression(callee) && !isNamespaceReceiver(checker)(callee.expression);
 
 const isEtaBodyForParam =
-  ({ ctx, paramName }: { readonly ctx: RuleContext; readonly paramName: string }) =>
+  ({
+    checker,
+    sourceFile,
+    paramName,
+  }: {
+    readonly checker: ts.TypeChecker;
+    readonly sourceFile: ts.SourceFile;
+    readonly paramName: string;
+  }) =>
   (body: ts.Expression) =>
     ts.isCallExpression(body) &&
-    body.arguments.length === 1 &&
-    !isMethodBindingWrapper(ctx.checker)(body.expression) &&
+    callArgCount(body) === 1 &&
+    !isMethodBindingWrapper(checker)(body.expression) &&
     O.exists(isIdentifierNamed(paramName))(RA.head(body.arguments)) &&
-    !referencesIdentifier({ sf: ctx.sourceFile, name: paramName, node: body.expression });
+    !referencesIdentifier({ sf: sourceFile, name: paramName, node: body.expression });
 
 const isEtaArrowWithParam =
   ({ ctx, arrow }: { readonly ctx: RuleContext; readonly arrow: ts.ArrowFunction }) =>
   (param: ts.ParameterDeclaration) =>
     ts.isIdentifier(param.name) &&
     !ts.isBlock(arrow.body) &&
-    isEtaBodyForParam({ ctx, paramName: param.name.text })(unwrapParens(arrow.body));
+    isEtaBodyForParam({
+      checker: ctx.checker,
+      sourceFile: ctx.sourceFile,
+      paramName: getParamNameText(param.name),
+    })(unwrapParens(arrow.body));
 
 const isEtaReducibleArrow = (ctx: RuleContext) => (arrow: ts.ArrowFunction) =>
   paramLengthLens.get(arrow) === 1 &&

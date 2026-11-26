@@ -1,6 +1,9 @@
 import * as B from 'fp-ts/lib/boolean.js';
+import { iso } from 'newtype-ts';
 import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as RNEA from 'fp-ts/lib/ReadonlyNonEmptyArray.js';
 import * as S from 'fp-ts/lib/string.js';
@@ -10,7 +13,25 @@ import type {
   CrossFileHint,
   ProjectModuleNode,
   ResolvedModuleData,
+  DirectoryPath,
+  LayerIndex,
+  ModuleCount,
+  RelativePath,
 } from '../model/projectReport.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const countFiles = (files: ReadonlyArray<string>) => files.length;
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoModuleCount = iso<ModuleCount>();
+const lookupDagModule = (dag: BuiltProjectDag) => (id: string) => liftNullable(dag.modules.get(id));
+const getRuntimeInEdges = (dag: BuiltProjectDag) => dag.runtimeInEdges;
+const lookupNodeByFile = (dag: BuiltProjectDag) => (file: string) => liftNullable(dag.nodeByFile.get(file));
 import type { ImportInfo } from '../model/report.js';
 
 export type ArchitecturalMotifInput = {
@@ -103,16 +124,16 @@ const isIoEffect = (e: string) =>
 
 const isEffectfulIo = RA.some(isIoEffect);
 
-const isTargetModule = (mod: ResolvedModuleData) => mod.isTarget;
-const getRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
-const getFilePath = (mod: ResolvedModuleData) => mod.filePath;
-const isNonBarrel = (mod: ResolvedModuleData) => !mod.isBarrel;
-const isActiveModule = (mod: ResolvedModuleData) => !mod.isBarrel && !mod.isTypeOnlyModule;
+const isTargetModule = (mod: ResolvedModuleData) => mod.scope === 'target';
+const getRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
+const getFilePath = (mod: ResolvedModuleData) => isoFilePath.unwrap(mod.filePath);
+const isNonBarrel = (mod: ResolvedModuleData) => (mod.moduleKind !== 'barrel' && mod.moduleKind !== 'barrel-type-only');
+const isActiveModule = (mod: ResolvedModuleData) => mod.moduleKind === 'standard';
 const getExportedFn = (m: ResolvedModuleData) => m.exportedFunction;
 
 const involvesAnyTarget = (dag: BuiltProjectDag) => (files: ReadonlyArray<string>) => {
   const targetFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(dag))),
   );
   return RA.some(inSet(targetFiles))(files);
 };
@@ -141,7 +162,7 @@ const buildStrategyHint = (input: {
 }) => {
   const symbols = sortStrings(RA.filterMap(getExportedFn)(input.mods));
   return {
-    hintId: `architectural-motif-strategy-${input.idx + 1}`,
+    hintId: isoHintId.wrap(`architectural-motif-strategy-${input.idx + 1}`),
     category: 'architectural-motif' as const,
     priority: 'medium' as const,
     files: input.files,
@@ -171,7 +192,7 @@ const toStrategyHint =
   };
 
 const detectParallelStrategyMotif = (input: ArchitecturalMotifInput) => {
-  const entries = RA.filterMap(extractStrategyEntry)(Array.from(input.dag.modules.values()));
+  const entries = RA.filterMap(extractStrategyEntry)(listDagModules(input.dag));
   const grouped = RNEA.groupBy(getStrategySig)(entries);
   const groupEntries = Object.entries(grouped);
   return RA.filterMap(toStrategyHint({ dag: input.dag, minOcc: input.minOcc }))(
@@ -184,7 +205,7 @@ const getEdgeSet =
   (filePath: string) =>
     Array.from(
       O.getOrElse(constant<ReadonlySet<string>>(new Set()))(
-        O.fromNullable(edgeMap.get(filePath)),
+        liftNullable(edgeMap.get(filePath)),
       ),
     );
 
@@ -194,13 +215,13 @@ const toLeakyEdgeFromTarget =
     B.match(
       () => O.none,
       () => O.some({ caller, callee: targetMod }),
-    )(!targetMod.isBarrel && isEffectfulIo(targetMod.exportedEffects));
+    )((targetMod.moduleKind !== 'barrel' && targetMod.moduleKind !== 'barrel-type-only') && isEffectfulIo(targetMod.exportedEffects));
 
 const toLeakyEdgeIfIo =
   (input: { readonly dag: BuiltProjectDag; readonly caller: ResolvedModuleData }) =>
   (targetFile: string): O.Option<LeakyEdge> =>
     O.chain(toLeakyEdgeFromTarget(input.caller))(
-      O.fromNullable(input.dag.modules.get(targetFile)),
+      lookupDagModule(input.dag)(targetFile),
     );
 
 const collectModLeakyEdges =
@@ -214,22 +235,22 @@ const collectModLeakyEdges =
       () => [],
       () =>
         RA.filterMap(toLeakyEdgeIfIo({ dag, caller: mod }))(
-          getEdgeSet(dag.runtimeOutEdges)(mod.filePath),
+          getEdgeSet(dag.runtimeOutEdges)(isoFilePath.unwrap(mod.filePath)),
         ),
     )(eligible);
   };
 
 const buildLeakyEdgeHint = (pair: readonly [LeakyEdge, number]) => {
   const [{ caller, callee }, idx] = pair;
-  const callerFn = O.getOrElse(constant(caller.relativePath))(caller.exportedFunction);
-  const calleeFn = O.getOrElse(constant(callee.relativePath))(callee.exportedFunction);
+  const callerFn = O.getOrElse(constant(isoRelativePath.unwrap(caller.relativePath)))(caller.exportedFunction);
+  const calleeFn = O.getOrElse(constant(isoRelativePath.unwrap(callee.relativePath)))(callee.exportedFunction);
   return {
-    hintId: `architectural-motif-effect-leak-${idx + 1}`,
+    hintId: isoHintId.wrap(`architectural-motif-effect-leak-${idx + 1}`),
     category: 'architectural-motif' as const,
     priority: 'high' as const,
-    files: [caller.relativePath, callee.relativePath],
+    files: [isoRelativePath.unwrap(caller.relativePath), isoRelativePath.unwrap(callee.relativePath)],
     symbols: [callerFn, calleeFn],
-    evidence: `Pure/synchronous module "${caller.relativePath}" (${caller.exportedEffects.join('/')}) imports async/I/O module "${callee.relativePath}" (${callee.exportedEffects.join('/')}).`,
+    evidence: `Pure/synchronous module "${isoRelativePath.unwrap(caller.relativePath)}" (${caller.exportedEffects.join('/')}) imports async/I/O module "${isoRelativePath.unwrap(callee.relativePath)}" (${callee.exportedEffects.join('/')}).`,
     suggestion:
       'Apply Functional Core, Imperative Shell: keep pure domain modules free of async/I/O dependencies and pass fetched data into pure functions from the outer TaskEither shell.',
     suggestedSignature: O.none,
@@ -244,7 +265,7 @@ const toLeakyEdgeHint = (pair: readonly [LeakyEdge, number]): O.Option<CrossFile
   return B.match(
     () => O.none,
     () => O.some(buildLeakyEdgeHint(pair)),
-  )(caller.isTarget || callee.isTarget);
+  )(caller.scope === 'target' || callee.scope === 'target');
 };
 
 const getSetSize = (s: ReadonlySet<string>) => s.size;
@@ -253,11 +274,11 @@ const isIoLeafNode =
   (input: { readonly dag: BuiltProjectDag; readonly mod: ResolvedModuleData }) =>
   (node: ProjectModuleNode) => {
     const inDeg = O.getOrElse(constant(0))(
-      O.map(getSetSize)(O.fromNullable(input.dag.runtimeInEdges.get(input.mod.filePath))),
+      O.map(getSetSize)(liftNullable(getRuntimeInEdges(input.dag).get(isoFilePath.unwrap(input.mod.filePath)))),
     );
     return (
       isActiveModule(input.mod) &&
-      node.layer === 0 &&
+      isoLayerIndex.unwrap(node.layer) === 0 &&
       isEffectfulIo(input.mod.exportedEffects) &&
       inDeg > 0
     );
@@ -266,12 +287,12 @@ const isIoLeafNode =
 const isIoLeaf =
   (dag: BuiltProjectDag) =>
   (m: ResolvedModuleData) =>
-    O.exists(isIoLeafNode({ dag, mod: m }))(O.fromNullable(dag.nodeByFile.get(m.filePath)));
+    O.exists(isIoLeafNode({ dag, mod: m }))(lookupNodeByFile(dag)(isoFilePath.unwrap(m.filePath)));
 
 const isModUnvisitedIoCaller =
   (input: { readonly visited: ReadonlySet<string>; readonly caller: string }) =>
   (callerMod: ResolvedModuleData) =>
-    !callerMod.isBarrel &&
+    (callerMod.moduleKind !== 'barrel' && callerMod.moduleKind !== 'barrel-type-only') &&
     isEffectfulIo(callerMod.exportedEffects) &&
     !input.visited.has(input.caller);
 
@@ -279,7 +300,7 @@ const isEligibleUnvisitedIoCaller =
   (input: { readonly dag: BuiltProjectDag; readonly visited: ReadonlySet<string> }) =>
   (caller: string) =>
     O.exists(isModUnvisitedIoCaller({ visited: input.visited, caller }))(
-      O.fromNullable(input.dag.modules.get(caller)),
+      lookupDagModule(input.dag)(caller),
     );
 
 const expandIoBfsNode =
@@ -287,7 +308,7 @@ const expandIoBfsNode =
   (curr: string): readonly [string, IoBfsState] => {
     const eligibleCallers = RA.filter(
       isEligibleUnvisitedIoCaller({ dag: input.dag, visited: input.state.visited }),
-    )(getEdgeSet(input.dag.runtimeInEdges)(curr));
+    )(getEdgeSet(getRuntimeInEdges(input.dag))(curr));
     const nextVisited = new Set([...input.state.visited, ...eligibleCallers]);
     const nextQueue = [...input.state.queue.slice(1), ...eligibleCallers];
     return [curr, { queue: nextQueue, visited: nextVisited }] as const;
@@ -298,28 +319,28 @@ const stepIoBfs =
   (state: IoBfsState): O.Option<readonly [string, IoBfsState]> =>
     O.map(expandIoBfsNode({ dag, state }))(RA.head(state.queue));
 
-const getNodeLayer = (n: ProjectModuleNode) => n.layer;
+const getNodeLayer = (n: ProjectModuleNode) => isoLayerIndex.unwrap(n.layer);
 
 const lookupLayer = (dag: BuiltProjectDag) => (f: string) =>
-  O.getOrElse(constant(0))(O.map(getNodeLayer)(O.fromNullable(dag.nodeByFile.get(f))));
+  O.getOrElse(constant(0))(O.map(getNodeLayer)(lookupNodeByFile(dag)(f)));
 
 const lookupRelativePath = (dag: BuiltProjectDag) => (f: string) =>
-  O.map(getRelativePath)(O.fromNullable(dag.modules.get(f)));
+  O.map(getRelativePath)(lookupDagModule(dag)(f));
 
 const lookupExportedFn = (dag: BuiltProjectDag) => (f: string) =>
-  O.chain(getExportedFn)(O.fromNullable(dag.modules.get(f)));
+  O.chain(getExportedFn)(lookupDagModule(dag)(f));
 
 const buildDeepIoHint = (input: {
   readonly files: ReadonlyArray<string>;
   readonly symbols: ReadonlyArray<string>;
   readonly layerCount: number;
 }) => ({
-  hintId: 'architectural-motif-deep-io-chain',
+  hintId: isoHintId.wrap('architectural-motif-deep-io-chain'),
   category: 'architectural-motif' as const,
   priority: 'medium' as const,
   files: input.files,
   symbols: input.symbols,
-  evidence: `Async/I/O effects propagate across ${input.layerCount} DAG layers and ${input.files.length} modules (${input.files.join(', ')}) starting from leaf I/O modules.`,
+  evidence: `Async/I/O effects propagate across ${input.layerCount} DAG layers and ${countFiles(input.files)} modules (${input.files.join(', ')}) starting from leaf I/O modules.`,
   suggestion:
     'Apply Functional Core, Imperative Shell (Ports & Adapters): fetch inputs at the boundary shell, compose intermediate domain logic as pure Either functions, and persist results at the edge.',
   suggestedSignature: O.none,
@@ -353,7 +374,7 @@ const runDeepIoBfs = (input: {
 
 const detectDeepIoChain = (input: ArchitecturalMotifInput) => {
   const ioLeafPaths = RA.map(getFilePath)(
-    RA.filter(isIoLeaf(input.dag))(Array.from(input.dag.modules.values())),
+    RA.filter(isIoLeaf(input.dag))(listDagModules(input.dag)),
   );
   return B.match(
     () => [],
@@ -363,7 +384,7 @@ const detectDeepIoChain = (input: ArchitecturalMotifInput) => {
 
 const detectEffectLayerLeakage = (input: ArchitecturalMotifInput) => {
   const leakyEdges = RA.chain(collectModLeakyEdges(input.dag))(
-    Array.from(input.dag.modules.values()),
+    listDagModules(input.dag),
   );
   const directHints = RA.filterMap(toLeakyEdgeHint)(
     RA.zip(RA.makeBy(leakyEdges.length, identityNum))(leakyEdges),
@@ -400,7 +421,7 @@ const getSymbolName = (sym: ts.Symbol) => sym.getName();
 const getTypeSymName = (t: ts.Type) =>
   O.getOrElse(constant(''))(
     O.map(getSymbolName)(
-      RA.head(RA.compact([O.fromNullable(t.aliasSymbol), O.fromNullable(t.getSymbol())])),
+      RA.head(RA.compact([liftNullable(t.aliasSymbol), liftNullable(t.getSymbol())])),
     ),
   );
 
@@ -433,7 +454,7 @@ const validateAndBuildOptic =
           key: `${rootTypeName}.${input.parts.join('.')}`,
           rootType: rootTypeName,
           pathParts: input.parts,
-          file: input.mod.relativePath,
+          file: isoRelativePath.unwrap(input.mod.relativePath),
         }),
     )(isValidRoot);
   };
@@ -492,12 +513,12 @@ const buildOpticHint = (input: {
 }) => {
   const pathTuple = RA.map(quoteSingle)(input.first.pathParts).join(', ');
   return {
-    hintId: `architectural-motif-shared-optic-${input.idx + 1}`,
+    hintId: isoHintId.wrap(`architectural-motif-shared-optic-${input.idx + 1}`),
     category: 'architectural-motif' as const,
     priority: 'medium' as const,
     files: input.files,
     symbols: [input.first.rootType],
-    evidence: `Nested property path "${input.first.rootType}.${input.first.pathParts.join('.')}" is traversed independently across ${input.files.length} modules (${input.files.join(', ')}).`,
+    evidence: `Nested property path "${input.first.rootType}.${input.first.pathParts.join('.')}" is traversed independently across ${countFiles(input.files)} modules (${input.files.join(', ')}).`,
     suggestion: `Extract a shared monocle-ts Lens/Optional alongside "${input.first.rootType}" so structural navigation and updates stay decoupled from internal nesting.`,
     suggestedSignature: O.some(
       `Lens.fromPath<${input.first.rootType}>()([${pathTuple}])`,
@@ -523,7 +544,7 @@ const toOpticHint =
 
 const detectCrossFileSharedOptics = (input: ArchitecturalMotifInput) => {
   const occurrences = RA.chain(collectModuleOptics(input.checker))(
-    RA.filter(isNonBarrel)(Array.from(input.dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(input.dag)),
   );
   const grouped = RNEA.groupBy(getOpticKey)(occurrences);
   const entries = Object.entries(grouped);

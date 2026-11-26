@@ -4,7 +4,13 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion, SymbolName } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
+const isoSymbolName = iso<SymbolName>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -50,13 +56,12 @@ const isIdentifierNamed = (name: string) => (n: ts.Node) =>
 const makeRecursiveHint = (b: BindingInfo) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `declarative-recursion-${b.name}`,
+      hintId: isoHintId.wrap(`declarative-recursion-${b.name}`),
       category: 'declarative-combinator',
       priority: 'medium',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `\`${b.name}\` uses explicit self-recursion.`,
-      suggestion:
-        'Prefer declarative `fp-ts/ReadonlyArray` combinators (`RA.unfold`, `RA.traverse`, `RA.foldMap`, `Monoid.concatAll`) over manual recursion.',
+      evidence: isoHintEvidence.wrap(`\`${b.name}\` uses explicit self-recursion.`),
+      suggestion: isoHintSuggestion.wrap('Prefer declarative `fp-ts/ReadonlyArray` combinators (`RA.unfold`, `RA.traverse`, `RA.foldMap`, `Monoid.concatAll`) over manual recursion.'),
       suggestedSignature: O.none,
       researchQuestions: [`Can \`${b.name}\` be expressed as a fold, unfold, or traverse?`],
     },
@@ -67,13 +72,12 @@ const makeRecursiveHint = (b: BindingInfo) => {
 const makeReduceHint = (b: BindingInfo) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `declarative-reduce-${b.name}`,
+      hintId: isoHintId.wrap(`declarative-reduce-${b.name}`),
       category: 'declarative-combinator',
       priority: 'low',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `\`${b.name}\` uses \`reduce\`.`,
-      suggestion:
-        'Verify whether `RA.filterMap`, `RA.partitionMap`, `RA.traverse`, or `Monoid.concatAll` expresses the intent more declaratively than `reduce`.',
+      evidence: isoHintEvidence.wrap(`\`${b.name}\` uses \`reduce\`.`),
+      suggestion: isoHintSuggestion.wrap('Verify whether `RA.filterMap`, `RA.partitionMap`, `RA.traverse`, or `Monoid.concatAll` expresses the intent more declaratively than `reduce`.'),
       suggestedSignature: O.none,
       researchQuestions: [
         `Is \`${b.name}\` building a filtered/partitioned collection or combining a Monoid?`,
@@ -89,7 +93,7 @@ const checkExprDeclarative =
     const text = expr.getText(ctx.sourceFile);
     const nodes = collectAllNodes(ctx.sourceFile)(expr);
     const isSelfRecursive =
-      b.kind === 'leaf-fn' && RA.some(isIdentifierNamed(b.name))(nodes);
+      b.kind === 'leaf-fn' && RA.some(isIdentifierNamed(isoSymbolName.unwrap(b.name)))(nodes);
     const usesManualReduce = /\b(RA|A)\.reduce\b/.test(text);
     const recursiveHint = B.match(
       RA.zero<AgentHint>,

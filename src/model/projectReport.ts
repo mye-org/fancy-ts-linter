@@ -1,6 +1,35 @@
 import type * as O from 'fp-ts/lib/Option.js';
+import { Newtype } from 'newtype-ts';
 import type * as ts from 'typescript';
-import type { AnalysisReport, HintPriority, ModuleIR } from './report.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type {
+  AnalysisReport,
+  ErrorCount,
+  HintCount,
+  HintId,
+  HintPriority,
+  ModuleIR,
+} from './report.js';
+
+export type RelativePath = Newtype<{ readonly RelativePath: unique symbol }, string>;
+export type DirectoryPath = Newtype<{ readonly DirectoryPath: unique symbol }, string>;
+export type ModuleCount = Newtype<{ readonly ModuleCount: unique symbol }, number>;
+export type ClusterCount = Newtype<{ readonly ClusterCount: unique symbol }, number>;
+export type CohesionScore = Newtype<{ readonly CohesionScore: unique symbol }, number>;
+export type JaccardScore = Newtype<{ readonly JaccardScore: unique symbol }, number>;
+export type EdgeCount = Newtype<{ readonly EdgeCount: unique symbol }, number>;
+export type CycleCount = Newtype<{ readonly CycleCount: unique symbol }, number>;
+export type DirectoryCount = Newtype<{ readonly DirectoryCount: unique symbol }, number>;
+export type DepthCount = Newtype<{ readonly DepthCount: unique symbol }, number>;
+export type DependencyCount = Newtype<{ readonly DependencyCount: unique symbol }, number>;
+export type LayerIndex = Newtype<{ readonly LayerIndex: unique symbol }, number>;
+export type FileCount = Newtype<{ readonly FileCount: unique symbol }, number>;
+export type StepCount = Newtype<{ readonly StepCount: unique symbol }, number>;
+export type OccurrenceCount = Newtype<{ readonly OccurrenceCount: unique symbol }, number>;
+
+export type ModuleScope = 'target' | 'dependency';
+export type ModuleKind = 'standard' | 'barrel' | 'type-only' | 'barrel-type-only';
+export type ModuleRole = 'entrypoint' | 'internal';
 
 export type CrossFileHintCategory =
   | 'junk-drawer-directory'
@@ -14,7 +43,7 @@ export type CrossFileHintCategory =
   | 'architectural-motif';
 
 export type CrossFileHint = {
-  readonly hintId: string;
+  readonly hintId: HintId;
   readonly category: CrossFileHintCategory;
   readonly priority: HintPriority;
   readonly files: ReadonlyArray<string>;
@@ -26,28 +55,27 @@ export type CrossFileHint = {
 };
 
 export type ProjectModuleNode = {
-  readonly filePath: string;
-  readonly relativePath: string;
-  readonly directory: string;
-  readonly isTarget: boolean;
-  readonly isBarrel: boolean;
-  readonly isTypeOnlyModule: boolean;
-  readonly isEntrypoint: boolean;
+  readonly filePath: FilePath;
+  readonly relativePath: RelativePath;
+  readonly directory: DirectoryPath;
+  readonly scope: ModuleScope;
+  readonly moduleKind: ModuleKind;
+  readonly role: ModuleRole;
   readonly exportedFunction: O.Option<string>;
   readonly exportedSignature: O.Option<string>;
   readonly effects: ReadonlyArray<string>;
-  readonly inDegree: number;
-  readonly outDegree: number;
-  readonly transitiveDependencyCount: number;
+  readonly inDegree: ModuleCount;
+  readonly outDegree: ModuleCount;
+  readonly transitiveDependencyCount: DependencyCount;
   readonly externalDependencies: ReadonlyArray<string>;
   readonly domainExternalDependencies: ReadonlyArray<string>;
   readonly referencedDomainTypes: ReadonlyArray<string>;
-  readonly layer: number;
+  readonly layer: LayerIndex;
 };
 
 export type ProjectEdge = {
-  readonly from: string;
-  readonly to: string;
+  readonly from: FilePath;
+  readonly to: FilePath;
   readonly isTypeOnly: boolean;
   readonly importedSymbols: ReadonlyArray<string>;
 };
@@ -59,24 +87,24 @@ export type DirectoryCluster = {
 };
 
 export type DirectoryCohesionMetric = {
-  readonly directory: string;
-  readonly moduleCount: number;
-  readonly clusterCount: number;
-  readonly cohesionScore: number;
-  readonly averageCallerJaccard: number;
-  readonly intraDirectoryEdges: number;
+  readonly directory: DirectoryPath;
+  readonly moduleCount: ModuleCount;
+  readonly clusterCount: ClusterCount;
+  readonly cohesionScore: CohesionScore;
+  readonly averageCallerJaccard: JaccardScore;
+  readonly intraDirectoryEdges: EdgeCount;
   readonly distinctExternalDeps: ReadonlyArray<string>;
   readonly clusters: ReadonlyArray<DirectoryCluster>;
 };
 
 export type ProjectDagSummary = {
-  readonly analyzedModuleCount: number;
-  readonly targetFileCount: number;
-  readonly edgeCount: number;
-  readonly cycleCount: number;
-  readonly directoryCount: number;
-  readonly maxDepth: number;
-  readonly barrelCount: number;
+  readonly analyzedModuleCount: ModuleCount;
+  readonly targetFileCount: ModuleCount;
+  readonly edgeCount: EdgeCount;
+  readonly cycleCount: CycleCount;
+  readonly directoryCount: DirectoryCount;
+  readonly maxDepth: DepthCount;
+  readonly barrelCount: ModuleCount;
 };
 
 export type ProjectDagGraph = {
@@ -88,12 +116,12 @@ export type ProjectDagGraph = {
 };
 
 export type ProjectAnalysisSummary = {
-  readonly totalFiles: number;
-  readonly passedFiles: number;
-  readonly failedFiles: number;
-  readonly totalErrors: number;
-  readonly totalFileHints: number;
-  readonly totalCrossFileHints: number;
+  readonly totalFiles: FileCount;
+  readonly passedFiles: FileCount;
+  readonly failedFiles: FileCount;
+  readonly totalErrors: ErrorCount;
+  readonly totalFileHints: HintCount;
+  readonly totalCrossFileHints: HintCount;
 };
 
 export type ProjectAnalysisReport = {
@@ -106,14 +134,13 @@ export type ProjectAnalysisReport = {
 };
 
 export type ResolvedModuleData = {
-  readonly filePath: string;
-  readonly relativePath: string;
-  readonly directory: string;
+  readonly filePath: FilePath;
+  readonly relativePath: RelativePath;
+  readonly directory: DirectoryPath;
   readonly sourceFile: ts.SourceFile;
   readonly ir: ModuleIR;
-  readonly isTarget: boolean;
-  readonly isBarrel: boolean;
-  readonly isTypeOnlyModule: boolean;
+  readonly scope: ModuleScope;
+  readonly moduleKind: ModuleKind;
   readonly exportedFunction: O.Option<string>;
   readonly exportedSignature: O.Option<string>;
   readonly exportedEffects: ReadonlyArray<string>;
@@ -145,11 +172,11 @@ export type BuiltProjectDag = {
 
 export type ResolvedAnalyzeOptions = {
   readonly tsconfigPath: O.Option<string>;
-  readonly maxFlowSteps: number;
+  readonly maxFlowSteps: StepCount;
   readonly format: 'json' | 'md';
   readonly includeGraph: boolean;
-  readonly minPatternOccurrences: number;
-  readonly minDirModules: number;
+  readonly minPatternOccurrences: OccurrenceCount;
+  readonly minDirModules: ModuleCount;
   readonly excludePatterns: ReadonlyArray<string>;
 };
 

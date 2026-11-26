@@ -1,13 +1,30 @@
 import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
+import { Newtype, iso } from 'newtype-ts';
 import * as ts from 'typescript';
 
+export type LineNumber = Newtype<{ readonly LineNumber: unique symbol }, number>;
+export type ColumnNumber = Newtype<{ readonly ColumnNumber: unique symbol }, number>;
+export type RuleId = Newtype<{ readonly RuleId: unique symbol }, string>;
+export type DiagnosticMessage = Newtype<{ readonly DiagnosticMessage: unique symbol }, string>;
+export type CodeSnippet = Newtype<{ readonly CodeSnippet: unique symbol }, string>;
+export type FixGuidance = Newtype<{ readonly FixGuidance: unique symbol }, string>;
+export type HintId = Newtype<{ readonly HintId: unique symbol }, string>;
+export type HintEvidence = Newtype<{ readonly HintEvidence: unique symbol }, string>;
+export type HintSuggestion = Newtype<{ readonly HintSuggestion: unique symbol }, string>;
+export type SymbolName = Newtype<{ readonly SymbolName: unique symbol }, string>;
+export type TypeSignature = Newtype<{ readonly TypeSignature: unique symbol }, string>;
+export type ErrorCount = Newtype<{ readonly ErrorCount: unique symbol }, number>;
+export type HintCount = Newtype<{ readonly HintCount: unique symbol }, number>;
+export type FieldName = Newtype<{ readonly FieldName: unique symbol }, string>;
+export type TypeText = Newtype<{ readonly TypeText: unique symbol }, string>;
+
 export type SourceLocation = {
-  readonly line: number;
-  readonly column: number;
-  readonly endLine: number;
-  readonly endColumn: number;
+  readonly line: LineNumber;
+  readonly column: ColumnNumber;
+  readonly endLine: LineNumber;
+  readonly endColumn: ColumnNumber;
 };
 
 export type ErrorCategory =
@@ -35,21 +52,21 @@ export type HintCategory =
 export type HintPriority = 'high' | 'medium' | 'low';
 
 export type DiagnosticError = {
-  readonly ruleId: string;
+  readonly ruleId: RuleId;
   readonly category: ErrorCategory;
   readonly location: SourceLocation;
-  readonly message: string;
-  readonly snippet: string;
-  readonly fixGuidance: string;
+  readonly message: DiagnosticMessage;
+  readonly snippet: CodeSnippet;
+  readonly fixGuidance: FixGuidance;
 };
 
 export type AgentHint = {
-  readonly hintId: string;
+  readonly hintId: HintId;
   readonly category: HintCategory;
   readonly priority: HintPriority;
-  readonly location: { readonly line: number; readonly column: number };
-  readonly evidence: string;
-  readonly suggestion: string;
+  readonly location: { readonly line: LineNumber; readonly column: ColumnNumber };
+  readonly evidence: HintEvidence;
+  readonly suggestion: HintSuggestion;
   readonly suggestedSignature: O.Option<string>;
   readonly researchQuestions: ReadonlyArray<string>;
 };
@@ -65,16 +82,16 @@ export type NodeKind =
   | 'other';
 
 export type TypeFlowNode = {
-  readonly name: string;
+  readonly name: SymbolName;
   readonly kind: NodeKind;
-  readonly signature: string;
+  readonly signature: TypeSignature;
   readonly effects: ReadonlyArray<string>;
   readonly stepCount: O.Option<number>;
 };
 
 export type TypeFlowEdge = {
-  readonly from: string;
-  readonly to: string;
+  readonly from: SymbolName;
+  readonly to: SymbolName;
   readonly role: 'flow-step' | 'applies' | 'uses';
 };
 
@@ -84,8 +101,8 @@ export type TypeFlowGraph = {
 };
 
 export type AnalysisSummary = {
-  readonly errorCount: number;
-  readonly hintCount: number;
+  readonly errorCount: ErrorCount;
+  readonly hintCount: HintCount;
   readonly exportedFunction: O.Option<string>;
   readonly exportedSignature: O.Option<string>;
 };
@@ -119,34 +136,36 @@ export type ImportInfo = {
   readonly isTypeOnly: boolean;
 };
 
+export type FieldPrimitiveKind = 'boolean' | 'raw-string' | 'raw-number' | 'newtype' | 'other';
+export type FieldNullability = 'required' | 'optional' | 'nullable' | 'optional-nullable';
+
 export type FieldInfo = {
-  readonly name: string;
-  readonly typeText: string;
-  readonly isBoolean: boolean;
-  readonly isOptional: boolean;
-  readonly isNullable: boolean;
-  readonly isRawString: boolean;
-  readonly isRawNumber: boolean;
-  readonly isNewtype: boolean;
+  readonly name: FieldName;
+  readonly typeText: TypeText;
+  readonly kind: FieldPrimitiveKind;
+  readonly nullability: FieldNullability;
 };
+
+export type DeclarationVisibility = 'exported' | 'private';
+export type TypeDeclKind = 'newtype' | 'discriminated-union' | 'standard';
 
 export type TypeDeclInfo = {
   readonly name: string;
-  readonly isExported: boolean;
-  readonly isNewtype: boolean;
-  readonly isDiscriminatedUnion: boolean;
+  readonly visibility: DeclarationVisibility;
+  readonly declKind: TypeDeclKind;
   readonly fields: ReadonlyArray<FieldInfo>;
   readonly location: SourceLocation;
   readonly node: ts.TypeAliasDeclaration | ts.InterfaceDeclaration;
 };
 
+export type BindingAnnotationKind = 'none' | 'satisfies' | 'explicit-return' | 'both';
+
 export type BindingInfo = {
-  readonly name: string;
-  readonly isExported: boolean;
+  readonly name: SymbolName;
+  readonly visibility: DeclarationVisibility;
   readonly kind: NodeKind;
-  readonly hasSatisfies: boolean;
-  readonly hasExplicitReturnType: boolean;
-  readonly signature: string;
+  readonly annotation: BindingAnnotationKind;
+  readonly signature: TypeSignature;
   readonly effects: ReadonlyArray<string>;
   readonly stepCount: O.Option<number>;
   readonly location: SourceLocation;
@@ -166,7 +185,7 @@ export type ModuleIR = {
 
 export type TypeInspector = {
   readonly getLocation: (sourceFile: ts.SourceFile) => (node: ts.Node) => SourceLocation;
-  readonly getSnippet: (sourceFile: ts.SourceFile) => (node: ts.Node) => string;
+  readonly getSnippet: (sourceFile: ts.SourceFile) => (node: ts.Node) => CodeSnippet;
   readonly unwrapSatisfiesAndParens: (expr: ts.Expression) => ts.Expression;
   readonly isFlowCall: (node: ts.Node) => boolean;
   readonly isPipeCall: (node: ts.Node) => boolean;
@@ -201,17 +220,22 @@ export type ReportInput = {
 export type BuildAnalysisReport = (input: ReportInput) => AnalysisReport;
 
 const isExportedFlowBinding = (binding: BindingInfo) =>
-  binding.isExported && binding.kind !== 'other';
+  binding.visibility === 'exported' && binding.kind !== 'other';
 
 const findExportedBinding = (ir: ModuleIR): O.Option<BindingInfo> =>
   RA.findFirst(isExportedFlowBinding)(ir.bindings);
 
-const getBindingName = (b: BindingInfo) => b.name;
-const getBindingSignature = (b: BindingInfo) => b.signature;
+const isoSymbolName = iso<SymbolName>();
+const isoTypeSignature = iso<TypeSignature>();
+const getBindingName = (b: BindingInfo) => isoSymbolName.unwrap(b.name);
+const getBindingSignature = (b: BindingInfo) => isoTypeSignature.unwrap(b.signature);
+
+const isoErrorCount = iso<ErrorCount>();
+const isoHintCount = iso<HintCount>();
 
 const toSummary = (input: ReportInput) => ({
-  errorCount: input.errors.length,
-  hintCount: input.hints.length,
+  errorCount: isoErrorCount.wrap(input.errors.length),
+  hintCount: isoHintCount.wrap(input.hints.length),
   exportedFunction: O.map(getBindingName)(findExportedBinding(input.ir)),
   exportedSignature: O.map(getBindingSignature)(findExportedBinding(input.ir)),
 });
@@ -229,7 +253,7 @@ const assembleReport = ({
   readonly summary: AnalysisSummary;
 }) => ({
   filePath: input.filePath,
-  passed: summary.errorCount === 0,
+  passed: isoErrorCount.unwrap(summary.errorCount) === 0,
   summary,
   errors: input.errors,
   hints: input.hints,

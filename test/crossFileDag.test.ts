@@ -290,8 +290,8 @@ export const runC = dispatch satisfies RunC;
       '--include-graph',
     ]);
 
-    expect(cliRes.exitCode).toBe(0);
-    const parsed = JSON.parse(cliRes.stdout) as {
+    expect(Number(cliRes.exitCode)).toBe(0);
+    const parsed = JSON.parse(String(cliRes.stdout)) as {
       passed: boolean;
       projectGraph?: { nodes: unknown[]; edges: unknown[] };
       crossFileHints: Array<{ category: string; evidence: string }>;

@@ -2,23 +2,40 @@ import { constant, flow } from 'fp-ts/lib/function.js';
 import * as B from 'fp-ts/lib/boolean.js';
 import * as Eq from 'fp-ts/lib/Eq.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import { Lens } from 'monocle-ts';
+import { iso } from 'newtype-ts';
 import * as ts from 'typescript';
 import { match } from 'ts-pattern';
 import type {
+  BindingAnnotationKind,
   BindingInfo,
+  DeclarationVisibility,
   FieldInfo,
+  FieldName,
+  FieldNullability,
+  FieldPrimitiveKind,
   ImportInfo,
   ModuleIR,
   NodeKind,
+  SymbolName,
   TypeDeclInfo,
+  TypeDeclKind,
   TypeFlowEdge,
   TypeFlowGraph,
   TypeFlowNode,
   TypeInspector,
+  TypeSignature,
+  TypeText,
 } from '../model/report.js';
+
+const isoSymbolName = iso<SymbolName>();
+const isoTypeSignature = iso<TypeSignature>();
+const isoFieldName = iso<FieldName>();
+const isoTypeText = iso<TypeText>();
 
 export type ExtractModuleIRInput = {
   readonly sourceFile: ts.SourceFile;
@@ -50,11 +67,19 @@ type EdgeContext = {
 const namedNodeText = Lens.fromPath<{ readonly name: ts.Identifier }>()(['name', 'text']);
 const sourceFileStatements = Lens.fromProp<ts.SourceFile>()('statements');
 
-const typeFlowEdgeEq: Eq.Eq<TypeFlowEdge> = Eq.struct({
-  from: S.Eq,
-  to: S.Eq,
-  role: S.Eq,
+const typeFlowEdgeKey = (e: TypeFlowEdge) => ({
+  from: isoSymbolName.unwrap(e.from),
+  to: isoSymbolName.unwrap(e.to),
+  role: e.role,
 });
+
+const typeFlowEdgeEq = Eq.contramap(typeFlowEdgeKey)(
+  Eq.struct({
+    from: S.Eq,
+    to: S.Eq,
+    role: S.Eq,
+  }),
+);
 
 const stepCollectNodes =
   ({ sf, tail }: { readonly sf: ts.SourceFile; readonly tail: ReadonlyArray<ts.Node> }) =>
@@ -71,7 +96,7 @@ const collectNodes = (sf: ts.SourceFile) => (root: ts.Node) =>
 
 const isExportKeyword = (m: ts.ModifierLike) => m.kind === ts.SyntaxKind.ExportKeyword;
 
-const getModifiersOpt = (node: ts.HasModifiers) => O.fromNullable(ts.getModifiers(node));
+const getModifiersOpt = (node: ts.HasModifiers) => liftNullable(ts.getModifiers(node));
 
 const hasExportModifier = (node: ts.HasModifiers) =>
   O.exists(RA.some(isExportKeyword))(
@@ -99,7 +124,7 @@ const extractNamedImports = (clause: ts.ImportClause) =>
   O.match(
     constant(RA.empty),
     extractNamedImportsFromBindings,
-  )(O.fromNullable(clause.namedBindings));
+  )(liftNullable(clause.namedBindings));
 
 const readNamespaceName = (nb: ts.NamespaceImport) => namedNodeText.get(nb);
 
@@ -107,17 +132,17 @@ const extractNamespaceFromBindings = (nb: ts.NamedImportBindings) =>
   O.map(readNamespaceName)(O.fromPredicate(ts.isNamespaceImport)(nb));
 
 const extractNamespaceImport = (clause: ts.ImportClause): O.Option<string> =>
-  O.chain(extractNamespaceFromBindings)(O.fromNullable(clause.namedBindings));
+  O.chain(extractNamespaceFromBindings)(liftNullable(clause.namedBindings));
 
 const readIdentifierText = (id: ts.Identifier) => id.text;
 
 const readClauseDefaultImport = (c: ts.ImportClause) =>
-  O.map(readIdentifierText)(O.fromNullable(c.name));
+  O.map(readIdentifierText)(liftNullable(c.name));
 
 const readClauseIsTypeOnly = (c: ts.ImportClause) => c.isTypeOnly;
 
 const toImportInfo = (stmt: ts.ImportDeclaration) => {
-  const clauseOpt = O.fromNullable(stmt.importClause);
+  const clauseOpt = liftNullable(stmt.importClause);
   return {
     moduleSpecifier: getStringLiteralText(stmt.moduleSpecifier),
     defaultImport: O.chain(readClauseDefaultImport)(clauseOpt),
@@ -139,6 +164,50 @@ const isRawStringType = (t: ts.Type) => (t.flags & ts.TypeFlags.StringLike) !== 
 
 const isRawNumberType = (t: ts.Type) => (t.flags & ts.TypeFlags.NumberLike) !== 0;
 
+const classifyFieldKind = ({
+  isNewtype,
+  nonNullType,
+}: {
+  readonly isNewtype: boolean;
+  readonly nonNullType: ts.Type;
+}): FieldPrimitiveKind =>
+  B.match<FieldPrimitiveKind>(
+    () =>
+      B.match<FieldPrimitiveKind>(
+        () =>
+          B.match<FieldPrimitiveKind>(
+            () =>
+              B.match<FieldPrimitiveKind>(
+                () => 'other',
+                () => 'raw-number',
+              )(isRawNumberType(nonNullType)),
+            () => 'raw-string',
+          )(isRawStringType(nonNullType)),
+        () => 'boolean',
+      )(isBooleanType(nonNullType)),
+    () => 'newtype',
+  )(isNewtype);
+
+const classifyNullability = ({
+  isOptional,
+  isNullable,
+}: {
+  readonly isOptional: boolean;
+  readonly isNullable: boolean;
+}): FieldNullability =>
+  B.match<FieldNullability>(
+    () =>
+      B.match<FieldNullability>(
+        () => 'required',
+        () => 'nullable',
+      )(isNullable),
+    () =>
+      B.match<FieldNullability>(
+        () => 'optional',
+        () => 'optional-nullable',
+      )(isNullable),
+  )(isOptional);
+
 const propertySymbolToField =
   ({
     checker,
@@ -153,15 +222,13 @@ const propertySymbolToField =
     const propType = checker.getTypeOfSymbolAtLocation(prop, declNode);
     const nonNullType = checker.getNonNullableType(propType);
     const isNewtype = inspector.isNewtypeBrand(nonNullType);
+    const isOptional = (prop.flags & ts.SymbolFlags.Optional) !== 0;
+    const isNullable = inspector.hasNullablePart(propType);
     return {
-      name: prop.getName(),
-      typeText: inspector.formatType(propType),
-      isBoolean: isBooleanType(nonNullType),
-      isOptional: (prop.flags & ts.SymbolFlags.Optional) !== 0,
-      isNullable: inspector.hasNullablePart(propType),
-      isRawString: !isNewtype && isRawStringType(nonNullType),
-      isRawNumber: !isNewtype && isRawNumberType(nonNullType),
-      isNewtype,
+      name: isoFieldName.wrap(prop.getName()),
+      typeText: isoTypeText.wrap(inspector.formatType(propType)),
+      kind: classifyFieldKind({ isNewtype, nonNullType }),
+      nullability: classifyNullability({ isOptional, isNullable }),
     };
   };
 
@@ -177,15 +244,39 @@ const isDiscriminatedUnionType = (type: ts.Type) =>
 const isTypeOrInterfaceDecl = (stmt: ts.Statement) =>
   ts.isTypeAliasDeclaration(stmt) || ts.isInterfaceDeclaration(stmt);
 
+const getNodeVisibility = (node: ts.HasModifiers): DeclarationVisibility =>
+  B.match<DeclarationVisibility>(
+    () => 'private',
+    () => 'exported',
+  )(hasExportModifier(node));
+
+const toTypeDeclKind = ({
+  isNewtype,
+  isDiscriminatedUnion,
+}: {
+  readonly isNewtype: boolean;
+  readonly isDiscriminatedUnion: boolean;
+}): TypeDeclKind =>
+  B.match<TypeDeclKind>(
+    () =>
+      B.match<TypeDeclKind>(
+        () => 'standard',
+        () => 'discriminated-union',
+      )(isDiscriminatedUnion),
+    () => 'newtype',
+  )(isNewtype);
+
 const toTypeDeclInfo =
   ({ sourceFile, checker, inspector }: ExtractModuleIRInput) =>
   (node: ts.TypeAliasDeclaration | ts.InterfaceDeclaration): TypeDeclInfo => {
     const type = checker.getTypeAtLocation(node);
     return {
       name: namedNodeText.get(node),
-      isExported: hasExportModifier(node),
-      isNewtype: inspector.isNewtypeBrand(type),
-      isDiscriminatedUnion: isDiscriminatedUnionType(type),
+      visibility: getNodeVisibility(node),
+      declKind: toTypeDeclKind({
+        isNewtype: inspector.isNewtypeBrand(type),
+        isDiscriminatedUnion: isDiscriminatedUnionType(type),
+      }),
       fields: RA.map(propertySymbolToField({ checker, inspector, declNode: node }))(
         type.getProperties(),
       ),
@@ -314,6 +405,38 @@ const pairDeclWithIdent =
 const extractIdentDecl = (decl: ts.VariableDeclaration) =>
   O.map(pairDeclWithIdent(decl))(O.fromPredicate(ts.isIdentifier)(decl.name));
 
+const pairSame = <A>(a: A) => [a, a] as const;
+
+const pairParenExpr = (p: ts.ParenthesizedExpression) => pairSame(p.expression);
+
+const stepParen = (expr: ts.Expression) =>
+  O.map(pairParenExpr)(O.fromPredicate(ts.isParenthesizedExpression)(expr));
+
+const unwrapParens = (expr: ts.Expression) =>
+  O.getOrElse(constant(expr))(RA.last(RA.unfold(expr, stepParen)));
+
+const isSatisfiesInit = flow(unwrapParens, ts.isSatisfiesExpression);
+
+const toBindingAnnotation = ({
+  hasSatisfies,
+  hasExplicitReturn,
+}: {
+  readonly hasSatisfies: boolean;
+  readonly hasExplicitReturn: boolean;
+}): BindingAnnotationKind =>
+  B.match<BindingAnnotationKind>(
+    () =>
+      B.match<BindingAnnotationKind>(
+        () => 'none',
+        () => 'explicit-return',
+      )(hasExplicitReturn),
+    () =>
+      B.match<BindingAnnotationKind>(
+        () => 'satisfies',
+        () => 'both',
+      )(hasExplicitReturn),
+  )(hasSatisfies);
+
 const buildIdentBinding =
   ({
     sourceFile,
@@ -323,19 +446,18 @@ const buildIdentBinding =
     isExported,
   }: BindingContext & { readonly stmt: ts.VariableStatement }) =>
   ({ decl, ident }: IdentDeclPair): ReadonlyArray<BindingInfo> => {
-    const initOpt = O.fromNullable(decl.initializer);
+    const initOpt = liftNullable(decl.initializer);
     const type = checker.getTypeAtLocation(decl);
-    const hasSatisfies = O.exists(ts.isSatisfiesExpression)(initOpt);
+    const hasSatisfies = O.exists(isSatisfiesInit)(initOpt);
     const hasExplicitReturn =
       decl.type !== undefined || hasExplicitReturnAnnotation(inspector)(initOpt);
     return [
       {
-        name: ident.text,
-        isExported,
+        name: isoSymbolName.wrap(ident.text),
+        visibility: getNodeVisibility(stmt),
         kind: classifyBindingKind({ sf: sourceFile, inspector, isExported, type, initOpt }),
-        hasSatisfies,
-        hasExplicitReturnType: hasExplicitReturn,
-        signature: inspector.formatType(type),
+        annotation: toBindingAnnotation({ hasSatisfies, hasExplicitReturn }),
+        signature: isoTypeSignature.wrap(inspector.formatType(type)),
         effects: inspector.detectEffects(type),
         stepCount: countFlowSteps(inspector)(initOpt),
         location: inspector.getLocation(sourceFile)(decl),
@@ -381,8 +503,8 @@ const isFlowStepArg =
 const toFlowStepEdge =
   (bindingName: string) =>
   (arg: ts.Identifier): TypeFlowEdge => ({
-    from: bindingName,
-    to: arg.text,
+    from: isoSymbolName.wrap(bindingName),
+    to: isoSymbolName.wrap(arg.text),
     role: 'flow-step',
   });
 
@@ -399,8 +521,8 @@ const isUsedBindingId =
 const toUsesEdge =
   (bindingName: string) =>
   (id: ts.Identifier): TypeFlowEdge => ({
-    from: bindingName,
-    to: id.text,
+    from: isoSymbolName.wrap(bindingName),
+    to: isoSymbolName.wrap(id.text),
     role: 'uses',
   });
 
@@ -458,7 +580,12 @@ const extractEdgesForBinding =
   (binding: BindingInfo): ReadonlyArray<TypeFlowEdge> =>
     O.match(
       constant(RA.empty),
-      extractEdgesFromInit({ sf, inspector, bindingName: binding.name, bindingNames }),
+      extractEdgesFromInit({
+        sf,
+        inspector,
+        bindingName: isoSymbolName.unwrap(binding.name),
+        bindingNames,
+      }),
     )(binding.initializer);
 
 const toTypeFlowNode = (b: BindingInfo) => ({
@@ -469,7 +596,7 @@ const toTypeFlowNode = (b: BindingInfo) => ({
   stepCount: b.stepCount,
 });
 
-const readBindingName = (b: BindingInfo) => b.name;
+const readBindingName = (b: BindingInfo) => isoSymbolName.unwrap(b.name);
 
 const buildModuleIR = (input: ExtractModuleIRInput) => {
   const { sourceFile, inspector } = input;

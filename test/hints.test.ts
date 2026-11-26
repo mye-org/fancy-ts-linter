@@ -63,13 +63,13 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
 
   it('builds accurate Type-Flow Graph nodes and edges for canonical priceOrder.ts', () => {
     const report = analyzeOne('test/fixtures/canonical/priceOrder.ts');
-    const exportedNode = report.typeFlowGraph.nodes.find((n) => n.name === 'priceOrder');
+    const exportedNode = report.typeFlowGraph.nodes.find((n) => String(n.name) === 'priceOrder');
     expect(exportedNode?.kind).toBe('exported-flow');
     expect(exportedNode?.effects).toContain('Either');
     expect(O.isSome(exportedNode?.stepCount ?? O.none)).toBe(true);
     expect(
       report.typeFlowGraph.edges.some(
-        (e) => e.from === 'priceOrder' && e.to === 'normalizeOrder' && e.role === 'flow-step',
+        (e) => String(e.from) === 'priceOrder' && String(e.to) === 'normalizeOrder' && e.role === 'flow-step',
       ),
     ).toBe(true);
   });
@@ -78,8 +78,8 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
     const report = analyzeOne('test/fixtures/violations/deepCurry.ts');
     const arityHints = report.hints.filter((h) => h.category === 'arity-strategy');
     expect(arityHints.length).toBe(2);
-    expect(arityHints.some((h) => h.evidence.includes('4 nested parameter levels'))).toBe(true);
-    expect(arityHints.some((h) => h.evidence.includes('3 nested parameter levels'))).toBe(true);
+    expect(arityHints.some((h) => String(h.evidence).includes('4 nested parameter levels'))).toBe(true);
+    expect(arityHints.some((h) => String(h.evidence).includes('3 nested parameter levels'))).toBe(true);
   });
 
   it('scopes optic hints to shared accessors and exempts curried/generic/HKT helpers from inference-hygiene', () => {

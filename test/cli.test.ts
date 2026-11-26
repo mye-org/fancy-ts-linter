@@ -10,9 +10,9 @@ describe('CLI runner & reporters', () => {
       '--format',
       'json',
     ]);
-    expect(res.exitCode).toBe(0);
-    expect(res.stderr).toBe('');
-    const parsed = JSON.parse(res.stdout) as {
+    expect(Number(res.exitCode)).toBe(0);
+    expect(String(res.stderr)).toBe('');
+    const parsed = JSON.parse(String(res.stdout)) as {
       passed: boolean;
       summary: { totalErrors: number; totalFiles: number };
       files: Array<{ passed: boolean; summary: { errorCount: number } }>;
@@ -37,15 +37,15 @@ describe('CLI runner & reporters', () => {
       '--format',
       'md',
     ]);
-    expect(res.exitCode).toBe(1);
-    expect(res.stdout).toContain('## [FAIL]');
-    expect(res.stdout).toContain('### Blocking Errors');
-    expect(res.stdout).toContain('## Project DAG & Cross-File Insights');
+    expect(Number(res.exitCode)).toBe(1);
+    expect(String(res.stdout)).toContain('## [FAIL]');
+    expect(String(res.stdout)).toContain('### Blocking Errors');
+    expect(String(res.stdout)).toContain('## Project DAG & Cross-File Insights');
   });
 
   it('returns exitCode 2 when no files are provided', () => {
     const res = runCli(['node', 'cli']);
-    expect(res.exitCode).toBe(2);
-    expect(res.stderr).toContain('No input files provided');
+    expect(Number(res.exitCode)).toBe(2);
+    expect(String(res.stderr)).toContain('No input files provided');
   });
 });

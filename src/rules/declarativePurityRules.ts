@@ -3,7 +3,12 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import * as ts from 'typescript';
-import type { DiagnosticError, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { DiagnosticError, RuleContext, DiagnosticMessage, FixGuidance, RuleId } from '../model/report.js';
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
@@ -29,13 +34,12 @@ type PurityErrorInput = {
 
 const makePurityError =
   (ctx: RuleContext) =>
-  ({ ruleId, node, message, fixGuidance }: PurityErrorInput): DiagnosticError => ({
-    ruleId,
+  ({ ruleId, node, message, fixGuidance }: PurityErrorInput): DiagnosticError => ({    ruleId: isoRuleId.wrap(ruleId),
     category: 'declarative-purity',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const hasConstFlag = (flags: ts.NodeFlags) => (flags & ts.NodeFlags.Const) !== 0;

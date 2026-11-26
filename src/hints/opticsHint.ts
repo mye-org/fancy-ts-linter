@@ -4,7 +4,13 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion, SymbolName } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
+const isoSymbolName = iso<SymbolName>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -64,7 +70,7 @@ const extractExprOccurrences =
 const extractBindingOccurrences = (sf: ts.SourceFile) => (b: BindingInfo) =>
   O.match<ts.Expression, ReadonlyArray<AccessorOccurrence>>(
     () => [],
-    extractExprOccurrences({ sf, bindingName: b.name }),
+    extractExprOccurrences({ sf, bindingName: isoSymbolName.unwrap(b.name) }),
   )(b.initializer);
 
 const matchingBindingName = (targetChain: string) => (other: AccessorOccurrence) =>
@@ -85,13 +91,12 @@ const buildSharedAccessorHint =
   (ctx: RuleContext) =>
   (matchOcc: AccessorOccurrence): ReadonlyArray<AgentHint> => [
     {
-      hintId: 'optic-shared-accessor',
+      hintId: isoHintId.wrap('optic-shared-accessor'),
       category: 'optic',
       priority: 'medium',
       location: getNodeLocation(ctx)(matchOcc.node),
-      evidence: `Nested path \`${matchOcc.chainText}\` is accessed across multiple pipelines/bindings.`,
-      suggestion:
-        'Extract a shared `monocle-ts` Optic (`Lens.fromPath<Entity>()([...])`) when the same nested path is reused across multiple pipelines or updates.',
+      evidence: isoHintEvidence.wrap(`Nested path \`${matchOcc.chainText}\` is accessed across multiple pipelines/bindings.`),
+      suggestion: isoHintSuggestion.wrap('Extract a shared `monocle-ts` Optic (`Lens.fromPath<Entity>()([...])`) when the same nested path is reused across multiple pipelines or updates.'),
       suggestedSignature: O.none,
       researchQuestions: [
         `Can \`${matchOcc.chainText}\` be shared as a single \`Lens\` or \`Optional\` across these pipelines?`,
@@ -126,13 +131,12 @@ const buildLensUpdateHint =
   (ctx: RuleContext) =>
   (node: ts.Node): ReadonlyArray<AgentHint> => [
     {
-      hintId: 'optic-lens-update-candidate',
+      hintId: isoHintId.wrap('optic-lens-update-candidate'),
       category: 'optic',
       priority: 'medium',
       location: getNodeLocation(ctx)(node),
-      evidence: 'Nested object spread performs an immutable multi-level update.',
-      suggestion:
-        'Replace nested object spreads with `monocle-ts` `Lens.fromPath<Entity>()([...]).set(...)` or `.modify(...)`.',
+      evidence: isoHintEvidence.wrap('Nested object spread performs an immutable multi-level update.'),
+      suggestion: isoHintSuggestion.wrap('Replace nested object spreads with `monocle-ts` `Lens.fromPath<Entity>()([...]).set(...)` or `.modify(...)`.'),
       suggestedSignature: O.none,
       researchQuestions: ['Can this nested immutable update be expressed with a composed `Lens`?'],
     },
@@ -151,13 +155,12 @@ const buildTraversalHint =
   (ctx: RuleContext) =>
   (node: ts.Node): ReadonlyArray<AgentHint> => [
     {
-      hintId: 'optic-traversal-candidate',
+      hintId: isoHintId.wrap('optic-traversal-candidate'),
       category: 'optic',
       priority: 'medium',
       location: getNodeLocation(ctx)(node),
-      evidence: 'Object spread combines shallow copy with nested array mapping.',
-      suggestion:
-        'Use a `monocle-ts` `Traversal` (`Lens.fromProp` composed with `fromTraversable(RA.Traversable)`) for declarative nested collection updates.',
+      evidence: isoHintEvidence.wrap('Object spread combines shallow copy with nested array mapping.'),
+      suggestion: isoHintSuggestion.wrap('Use a `monocle-ts` `Traversal` (`Lens.fromProp` composed with `fromTraversable(RA.Traversable)`) for declarative nested collection updates.'),
       suggestedSignature: O.none,
       researchQuestions: ['Can this nested array update be composed as a reusable `Traversal`?'],
     },
@@ -178,13 +181,12 @@ const buildOptionalPrismHint =
   (input: { readonly ctx: RuleContext; readonly count: number }) =>
   (node: ts.Node): ReadonlyArray<AgentHint> => [
     {
-      hintId: 'optic-optional-prism-candidate',
+      hintId: isoHintId.wrap('optic-optional-prism-candidate'),
       category: 'optic',
       priority: 'low',
       location: getNodeLocation(input.ctx)(node),
-      evidence: `Detected ${input.count} \`fromNullable\` lifts that may represent a deep optional traversal.`,
-      suggestion:
-        'Consider composing `monocle-ts` `Optional` / `Prism` (`Lens.fromNullableProp` or `Prism.fromPredicate`) for deep optional or sum-type traversals.',
+      evidence: isoHintEvidence.wrap(`Detected ${input.count} \`fromNullable\` lifts that may represent a deep optional traversal.`),
+      suggestion: isoHintSuggestion.wrap('Consider composing `monocle-ts` `Optional` / `Prism` (`Lens.fromNullableProp` or `Prism.fromPredicate`) for deep optional or sum-type traversals.'),
       suggestedSignature: O.none,
       researchQuestions: [
         'Are these nullable lifts traversing a nested optional structure or sum type?',

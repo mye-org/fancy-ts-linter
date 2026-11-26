@@ -1,6 +1,8 @@
 import * as B from 'fp-ts/lib/boolean.js';
 import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as Ord from 'fp-ts/lib/Ord.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as RNEA from 'fp-ts/lib/ReadonlyNonEmptyArray.js';
@@ -10,8 +12,31 @@ import type {
   BuiltProjectDag,
   CrossFileHint,
   ResolvedModuleData,
+  DirectoryPath,
+  LayerIndex,
+  ModuleCount,
+  RelativePath,
 } from '../model/projectReport.js';
-import type { BindingInfo, TypeDeclInfo } from '../model/report.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoModuleCount = iso<ModuleCount>();
+const getModuleTypeDecls = (m: ResolvedModuleData) => m.ir.typeDeclarations;
+const printType = (checker: ts.TypeChecker) => (type: ts.Type) => checker.typeToString(type);
+const getSymType = (checker: ts.TypeChecker) => (sym: ts.Symbol) => checker.getTypeOfSymbol(sym);
+const getSymTypeAt = ({ checker, node }: { readonly checker: ts.TypeChecker; readonly node: ts.Node }) => (sym: ts.Symbol) => checker.getTypeOfSymbolAtLocation(sym, node);
+import { iso } from 'newtype-ts';
+import type { BindingInfo, FieldInfo, FieldName, SymbolName, TypeDeclInfo, TypeText } from '../model/report.js';
+const isoFieldName = iso<FieldName>();
+const isoTypeText = iso<TypeText>();
+const isoSymbolName = iso<SymbolName>();
+const toNamedField = (f: FieldInfo) => ({ name: isoFieldName.unwrap(f.name), typeText: isoTypeText.unwrap(f.typeText) });
 
 export type GenericAbstractionInput = {
   readonly dag: BuiltProjectDag;
@@ -85,13 +110,13 @@ const isPrimitiveOrStdType = (name: string) =>
 const normalizeTypeText = (raw: string) =>
   raw.replace(/\s+/g, ' ').replace(/\breadonly\s+/g, '').trim();
 
-const isNonBarrel = (mod: ResolvedModuleData) => !mod.isBarrel;
-const isTargetModule = (mod: ResolvedModuleData) => mod.isTarget;
-const getRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
+const isNonBarrel = (mod: ResolvedModuleData) => (mod.moduleKind !== 'barrel' && mod.moduleKind !== 'barrel-type-only');
+const isTargetModule = (mod: ResolvedModuleData) => mod.scope === 'target';
+const getRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
 
 const involvesAnyTarget = (dag: BuiltProjectDag) => (files: ReadonlyArray<string>) => {
   const targetFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(dag))),
   );
   return RA.some(inSet(targetFiles))(files);
 };
@@ -101,7 +126,7 @@ const matchArrayToStrings = (m: RegExpMatchArray) => Array.from(m);
 const matchCapIdents = (t: string) =>
   O.getOrElse(constant<ReadonlyArray<string>>([]))(
     O.map(matchArrayToStrings)(
-      O.fromNullable(t.match(/\b[A-Z][a-zA-Z0-9_]*\b/g)),
+      liftNullable(t.match(/\b[A-Z][a-zA-Z0-9_]*\b/g)),
     ),
   );
 
@@ -135,10 +160,10 @@ const replaceDomainIdents =
 
 const getDeclName = (td: TypeDeclInfo) => td.name;
 const getReferencedDomainTypes = (m: ResolvedModuleData) => m.referencedDomainTypes;
-const getDeclNames = (m: ResolvedModuleData) => RA.map(getDeclName)(m.ir.typeDeclarations);
+const getDeclNames = (m: ResolvedModuleData) => RA.map(getDeclName)(getModuleTypeDecls(m));
 
 const collectAllDomainTypes = (dag: BuiltProjectDag) => {
-  const mods = Array.from(dag.modules.values());
+  const mods = listDagModules(dag);
   return new Set([
     ...RA.chain(getReferencedDomainTypes)(mods),
     ...RA.chain(getDeclNames)(mods),
@@ -172,7 +197,7 @@ const tryBuildSkeleton = (input: {
   readonly domainTypes: ReadonlySet<string>;
   readonly td: TypeDeclInfo;
 }): O.Option<SkeletonOccurrence> => {
-  const sortedFields = sortFieldsByName(input.td.fields);
+  const sortedFields = sortFieldsByName(RA.map(toNamedField)(input.td.fields));
   const orderedIdents = collectIdentOrder({
     texts: RA.map(getNamedFieldTypeText)(sortedFields),
     domainTypes: input.domainTypes,
@@ -197,10 +222,10 @@ const extractSkeletonOccurrence =
   (input: { readonly file: string; readonly domainTypes: ReadonlySet<string> }) =>
   (td: TypeDeclInfo): O.Option<SkeletonOccurrence> => {
     const hasTypeParams = O.exists(hasNonEmptyTypeParams)(
-      O.fromNullable(td.node.typeParameters),
+      liftNullable(td.node.typeParameters),
     );
     const eligible =
-      !td.isNewtype && !td.isDiscriminatedUnion && td.fields.length >= 2 && !hasTypeParams;
+      td.declKind === 'standard' && td.fields.length >= 2 && !hasTypeParams;
     return B.match(
       () => O.none,
       () => tryBuildSkeleton({ file: input.file, domainTypes: input.domainTypes, td }),
@@ -210,8 +235,8 @@ const extractSkeletonOccurrence =
 const collectModuleSkeletons =
   (domainTypes: ReadonlySet<string>) =>
   (mod: ResolvedModuleData) =>
-    RA.filterMap(extractSkeletonOccurrence({ file: mod.relativePath, domainTypes }))(
-      mod.ir.typeDeclarations,
+    RA.filterMap(extractSkeletonOccurrence({ file: isoRelativePath.unwrap(mod.relativePath), domainTypes }))(
+      getModuleTypeDecls(mod),
     );
 
 const getSkeletonKey = (s: SkeletonOccurrence) => s.skeleton;
@@ -232,7 +257,7 @@ const buildGenericDataTypeHint = (input: {
     () => '<T0, T1>',
   )(input.skeleton.includes('T1'));
   return {
-    hintId: `generic-datatype-${input.idx + 1}`,
+    hintId: isoHintId.wrap(`generic-datatype-${input.idx + 1}`),
     category: 'generic-abstraction' as const,
     priority: 'high' as const,
     files: input.files,
@@ -270,7 +295,7 @@ const toGenericDataTypeHint =
 const detectGenericDataTypes = (input: GenericAbstractionInput) => {
   const domainTypes = collectAllDomainTypes(input.dag);
   const occurrences = RA.chain(collectModuleSkeletons(domainTypes))(
-    RA.filter(isNonBarrel)(Array.from(input.dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(input.dag)),
   );
   const grouped = RNEA.groupBy(getSkeletonKey)(occurrences);
   const entries = Object.entries(grouped);
@@ -283,8 +308,8 @@ const formatSymbolProp =
   (input: { readonly checker: ts.TypeChecker; readonly location: ts.Node }) =>
   (p: ts.Symbol) => {
     const pt = normalizeTypeText(
-      input.checker.typeToString(
-        input.checker.getTypeOfSymbolAtLocation(p, input.location),
+      printType(input.checker)(
+        getSymTypeAt({ checker: input.checker, node: input.location })(p),
       ),
     );
     return `${p.getName()}:${pt}`;
@@ -297,7 +322,7 @@ const getStructuralShapeKey = (input: {
 }) => {
   const props = input.type.getProperties();
   return B.match(
-    () => normalizeTypeText(input.checker.typeToString(input.type)),
+    () => normalizeTypeText(printType(input.checker)(input.type)),
     () =>
       sortStrings(
         RA.map(formatSymbolProp({ checker: input.checker, location: input.location }))(
@@ -313,8 +338,8 @@ const compareByShapeKey = (input: {
   readonly b: ts.Type;
   readonly location: ts.Node;
 }) => {
-  const sa = normalizeTypeText(input.checker.typeToString(input.a));
-  const sb = normalizeTypeText(input.checker.typeToString(input.b));
+  const sa = normalizeTypeText(printType(input.checker)(input.a));
+  const sb = normalizeTypeText(printType(input.checker)(input.b));
   return B.match(
     () =>
       getStructuralShapeKey({
@@ -349,8 +374,8 @@ const classifyBinaryTypeclass = (input: {
   readonly retType: ts.Type;
   readonly location: ts.Node;
 }): O.Option<TypeclassMatch> => {
-  const t0Str = normalizeTypeText(input.checker.typeToString(input.lhsType));
-  const retStr = normalizeTypeText(input.checker.typeToString(input.retType));
+  const t0Str = normalizeTypeText(printType(input.checker)(input.lhsType));
+  const retStr = normalizeTypeText(printType(input.checker)(input.retType));
   const sameInputs =
     !isPrimitiveOrStdType(t0Str) &&
     areTypesStructurallyEquivalent({
@@ -401,7 +426,7 @@ const matchCurriedInnerParam =
     classifyBinaryTypeclass({
       checker: input.checker,
       lhsType: input.p0Type,
-      rhsType: input.checker.getTypeOfSymbol(p1),
+      rhsType: getSymType(input.checker)(p1),
       retType: input.innerSig.getReturnType(),
       location: input.declaration,
     });
@@ -446,8 +471,8 @@ const matchPairSecondProp =
   (prop1: ts.Symbol) =>
     classifyBinaryTypeclass({
       checker: input.checker,
-      lhsType: input.checker.getTypeOfSymbolAtLocation(input.prop0, input.declaration),
-      rhsType: input.checker.getTypeOfSymbolAtLocation(prop1, input.declaration),
+      lhsType: getSymTypeAt({ checker: input.checker, node: input.declaration })(input.prop0),
+      rhsType: getSymTypeAt({ checker: input.checker, node: input.declaration })(prop1),
       retType: input.retType,
       location: input.declaration,
     });
@@ -507,7 +532,7 @@ const matchPrimaryParam =
     readonly retType: ts.Type;
   }) =>
   (p0: ts.Symbol): O.Option<TypeclassOccurrence> => {
-    const p0Type = input.checker.getTypeOfSymbol(p0);
+    const p0Type = getSymType(input.checker)(p0);
     const curriedMatch = matchCurriedTypeclass({
       checker: input.checker,
       p0Type,
@@ -521,7 +546,10 @@ const matchPrimaryParam =
       declaration: input.primary.declaration,
     });
     return O.map(
-      toTypeclassOccurrence({ file: input.relativePath, symbol: input.primary.name }),
+      toTypeclassOccurrence({
+        file: input.relativePath,
+        symbol: isoSymbolName.unwrap(input.primary.name),
+      }),
     )(RA.head(RA.compact([curriedMatch, pairMatch])));
   };
 
@@ -553,17 +581,17 @@ const analyzePrimaryBinding =
     )(singleElementHead(input.checker.getTypeAtLocation(primary.declaration).getCallSignatures()));
 
 const isPrimaryTypeclassCandidate = (b: BindingInfo) =>
-  b.isExported && b.kind !== 'other' && b.kind !== 'typeclass-instance';
+  b.visibility === 'exported' && b.kind !== 'other' && b.kind !== 'typeclass-instance';
 
 const analyzeModuleTypeclass =
   (checker: ts.TypeChecker) =>
   (mod: ResolvedModuleData): O.Option<TypeclassOccurrence> => {
     const eligible =
-      !mod.isBarrel && !mod.isTypeOnlyModule && O.isSome(mod.exportedFunction);
+      mod.moduleKind === 'standard' && O.isSome(mod.exportedFunction);
     return B.match(
       () => O.none,
       () =>
-        O.chain(analyzePrimaryBinding({ checker, relativePath: mod.relativePath }))(
+        O.chain(analyzePrimaryBinding({ checker, relativePath: isoRelativePath.unwrap(mod.relativePath) }))(
           RA.findFirst(isPrimaryTypeclassCandidate)(mod.ir.bindings),
         ),
     )(eligible);
@@ -592,7 +620,7 @@ const buildTypeclassHint = (input: {
 }) => {
   const symbols = RA.uniq(S.Eq)(sortStrings(RA.map(getOccSymbol)(input.occs)));
   return {
-    hintId: `generic-typeclass-${input.kind.toLowerCase().replace(/[^a-z]/g, '-')}`,
+    hintId: isoHintId.wrap(`generic-typeclass-${input.kind.toLowerCase().replace(/[^a-z]/g, '-')}`),
     category: 'generic-abstraction' as const,
     priority: 'medium' as const,
     files: input.files,
@@ -627,7 +655,7 @@ const toTypeclassHint =
 
 const detectFpTypeclassOpportunities = (input: GenericAbstractionInput) => {
   const occurrences = RA.filterMap(analyzeModuleTypeclass(input.checker))(
-    Array.from(input.dag.modules.values()),
+    listDagModules(input.dag),
   );
   const grouped = RNEA.groupBy(getOccKind)(occurrences);
   return RA.filterMap(toTypeclassHint({ dag: input.dag, minOcc: input.minOcc }))(

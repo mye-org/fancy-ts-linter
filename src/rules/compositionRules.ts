@@ -3,7 +3,12 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { DiagnosticError, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { DiagnosticError, RuleContext, DiagnosticMessage, FixGuidance, RuleId } from '../model/report.js';
+
+const isoRuleId = iso<RuleId>();
+const isoDiagMsg = iso<DiagnosticMessage>();
+const isoFixGuidance = iso<FixGuidance>();
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
@@ -33,13 +38,12 @@ type CompErrorInput = {
 
 const makeCompError =
   (ctx: RuleContext) =>
-  ({ ruleId, node, message, fixGuidance }: CompErrorInput): DiagnosticError => ({
-    ruleId,
+  ({ ruleId, node, message, fixGuidance }: CompErrorInput): DiagnosticError => ({    ruleId: isoRuleId.wrap(ruleId),
     category: 'point-free',
     location: ctx.inspector.getLocation(ctx.sourceFile)(node),
-    message,
+    message: isoDiagMsg.wrap(message),
     snippet: ctx.inspector.getSnippet(ctx.sourceFile)(node),
-    fixGuidance,
+    fixGuidance: isoFixGuidance.wrap(fixGuidance),
   });
 
 const isPipeCallFromCtx = (ctx: RuleContext) => (n: ts.Node) => ctx.inspector.isPipeCall(n);

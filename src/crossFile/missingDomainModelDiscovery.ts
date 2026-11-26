@@ -2,6 +2,8 @@ import * as B from 'fp-ts/lib/boolean.js';
 import { flow } from 'fp-ts/lib/function.js';
 import * as N from 'fp-ts/lib/number.js';
 import * as O from 'fp-ts/lib/Option.js';
+
+import { fromNullable as liftNullable } from 'fp-ts/lib/Option.js';
 import * as Ord from 'fp-ts/lib/Ord.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as RNEA from 'fp-ts/lib/ReadonlyNonEmptyArray.js';
@@ -11,8 +13,30 @@ import type {
   BuiltProjectDag,
   CrossFileHint,
   ResolvedModuleData,
+  DirectoryPath,
+  LayerIndex,
+  ModuleCount,
+  RelativePath,
 } from '../model/projectReport.js';
-import type { TypeDeclInfo } from '../model/report.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const countFiles = (files: ReadonlyArray<string>) => files.length;
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoModuleCount = iso<ModuleCount>();
+const getSymbolTypeAt = ({ checker, node }: { readonly checker: ts.TypeChecker; readonly node: ts.Node }) => (sym: ts.Symbol) => checker.getTypeOfSymbolAtLocation(sym, node);
+const getNodeType = (checker: ts.TypeChecker) => (node: ts.Node) => checker.getTypeAtLocation(node);
+const getModuleTypeDecls = (m: ResolvedModuleData) => m.ir.typeDeclarations;
+import { iso } from 'newtype-ts';
+import type { FieldInfo, FieldName, TypeDeclInfo, TypeText } from '../model/report.js';
+const isoFieldName = iso<FieldName>();
+const isoTypeText = iso<TypeText>();
+const toPlainField = (f: FieldInfo) => ({ name: isoFieldName.unwrap(f.name), typeText: isoTypeText.unwrap(f.typeText) });
 
 export type MissingDomainModelInput = {
   readonly dag: BuiltProjectDag;
@@ -79,7 +103,7 @@ const formatCapitalized = (part: string) => (first: string) =>
 const capitalizePart = (part: string) =>
   B.match(
     () => '',
-    () => O.match(() => '', formatCapitalized(part))(O.fromNullable(part[0])),
+    () => O.match(() => '', formatCapitalized(part))(liftNullable(part[0])),
   )(part.length > 0);
 
 const toPascalCase = (s: string) =>
@@ -109,13 +133,13 @@ const isDomainPrimitiveFieldName = (name: string) =>
     name,
   );
 
-const isTargetModule = (mod: ResolvedModuleData) => mod.isTarget;
-const isNonBarrel = (mod: ResolvedModuleData) => !mod.isBarrel;
-const getRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
+const isTargetModule = (mod: ResolvedModuleData) => mod.scope === 'target';
+const isNonBarrel = (mod: ResolvedModuleData) => (mod.moduleKind !== 'barrel' && mod.moduleKind !== 'barrel-type-only');
+const getRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
 
 const involvesAnyTarget = (dag: BuiltProjectDag) => (files: ReadonlyArray<string>) => {
   const targetFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(dag))),
   );
   return RA.some(inSet(targetFiles))(files);
 };
@@ -165,24 +189,23 @@ const toShapeFieldFromIr = (f: { readonly name: string; readonly typeText: strin
 const isEligibleTypeDecl =
   (checker: ts.TypeChecker) =>
   (td: TypeDeclInfo) =>
-    !td.isNewtype &&
-    !td.isDiscriminatedUnion &&
+    td.declKind === 'standard' &&
     td.fields.length >= 2 &&
-    !isPrimitiveOrLiteralUnion(checker.getTypeAtLocation(td.node));
+    !isPrimitiveOrLiteralUnion(getNodeType(checker)(td.node));
 
 const toDeclShape =
   (file: string) =>
   (td: TypeDeclInfo): ObjectShapeRecord => ({
     file,
     typeName: td.name,
-    fields: sortFields(RA.map(toShapeFieldFromIr)(td.fields)),
+    fields: sortFields(RA.map(toShapeFieldFromIr)(RA.map(toPlainField)(td.fields))),
   });
 
 const toSymbolShapeField =
   (input: { readonly checker: ts.TypeChecker; readonly node: ts.Node }) =>
   (prop: ts.Symbol): ShapeField => {
     const pt = normalizeTypeText(
-      input.checker.typeToString(input.checker.getTypeOfSymbolAtLocation(prop, input.node)),
+      input.checker.typeToString(getSymbolTypeAt({ checker: input.checker, node: input.node })(prop)),
     );
     return { name: prop.getName(), typeText: pt, key: `${prop.getName()}:${pt}` };
   };
@@ -193,7 +216,7 @@ const isInlineTypeLiteral = (node: ts.Node): node is ts.TypeLiteralNode =>
 const extractInlineShape =
   (input: { readonly file: string; readonly checker: ts.TypeChecker }) =>
   (node: ts.TypeLiteralNode): O.Option<ObjectShapeRecord> => {
-    const type = input.checker.getTypeAtLocation(node);
+    const type = getNodeType(input.checker)(node);
     const props = type.getProperties();
     return B.match(
       () => O.none,
@@ -211,13 +234,13 @@ const extractInlineShape =
 const collectModuleObjectShapes =
   (checker: ts.TypeChecker) =>
   (mod: ResolvedModuleData): ReadonlyArray<ObjectShapeRecord> => {
-    const declShapes = RA.map(toDeclShape(mod.relativePath))(
-      RA.filter(isEligibleTypeDecl(checker))(mod.ir.typeDeclarations),
+    const declShapes = RA.map(toDeclShape(isoRelativePath.unwrap(mod.relativePath)))(
+      RA.filter(isEligibleTypeDecl(checker))(getModuleTypeDecls(mod)),
     );
     const inlineShapes = RA.filterMap(
       flow(
         O.fromPredicate(isInlineTypeLiteral),
-        O.chain(extractInlineShape({ file: mod.relativePath, checker })),
+        O.chain(extractInlineShape({ file: isoRelativePath.unwrap(mod.relativePath), checker })),
       ),
     )(collectAllNodes(mod.sourceFile));
     return [...declShapes, ...inlineShapes];
@@ -228,7 +251,7 @@ const collectObjectShapes = (input: {
   readonly checker: ts.TypeChecker;
 }) =>
   RA.chain(collectModuleObjectShapes(input.checker))(
-    RA.filter(isNonBarrel)(Array.from(input.dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(input.dag)),
   );
 
 const buildPairCluster =
@@ -277,13 +300,13 @@ const isValidCluster =
   (c: FieldCluster) => {
     const nonGenericCount = RA.filter(isNonGenericFieldKey)(c.keys).length;
     return (
-      c.files.length >= minOcc &&
+      countFiles(c.files) >= minOcc &&
       (nonGenericCount >= 2 || (c.keys.length >= 3 && nonGenericCount >= 1))
     );
   };
 
 const negKeyLen = (c: FieldCluster) => -c.keys.length;
-const negFileCount = (c: FieldCluster) => -c.files.length;
+const negFileCount = (c: FieldCluster) => -countFiles(c.files);
 const byClusterSize = Ord.contramap(negKeyLen)(N.Ord);
 const byClusterFiles = Ord.contramap(negFileCount)(N.Ord);
 const sortClusters = RA.sortBy([byClusterSize, byClusterFiles]);
@@ -328,15 +351,15 @@ const buildFieldClusterHint = (input: {
     () => rawSuggested,
   )(rawSuggested.length > 0);
   return {
-    hintId: `missing-domain-model-fields-${input.idx + 1}`,
+    hintId: isoHintId.wrap(`missing-domain-model-fields-${input.idx + 1}`),
     category: 'missing-domain-model' as const,
     priority: B.match(
       () => 'medium' as const,
       () => 'high' as const,
-    )(input.cluster.keys.length >= 3 || input.files.length >= 4),
+    )(input.cluster.keys.length >= 3 || countFiles(input.files) >= 4),
     files: input.files,
     symbols: sortStrings(input.cluster.types),
-    evidence: `Field cluster { ${fieldsReadable.join('; ')} } is duplicated across ${input.files.length} modules (${input.files.join(', ')}) without a shared domain type.`,
+    evidence: `Field cluster { ${fieldsReadable.join('; ')} } is duplicated across ${countFiles(input.files)} modules (${input.files.join(', ')}) without a shared domain type.`,
     suggestion: `Extract a canonical Value Object / Domain Model type (e.g. "${suggestedName}") into a shared domain types module and compose it instead of repeating these fields.`,
     suggestedSignature: O.some(
       `export type ${suggestedName} = { ${fieldsReadable.join('; ')} };`,
@@ -420,7 +443,7 @@ const computeFieldClusterHints = (input: {
     RA.map(toFilteredShape(input.frequentFields))(input.shapes),
   );
   const targetRelFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(input.dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(input.dag))),
   );
   const rawCandidateKeys = RA.filterMap(buildPairCluster(targetRelFiles))(
     makeShapePairs(perFileFiltered),
@@ -461,7 +484,7 @@ const getUnionTypes = (u: ts.UnionType) => u.types;
 const readTagPropValue =
   (input: { readonly checker: ts.TypeChecker; readonly node: ts.Node }) =>
   (sym: ts.Symbol): O.Option<string> => {
-    const propType = input.checker.getTypeOfSymbolAtLocation(sym, input.node);
+    const propType = getSymbolTypeAt({ checker: input.checker, node: input.node })(sym);
     return O.map(getLiteralValue)(O.fromPredicate(isStringLiteralType)(propType));
   };
 
@@ -470,9 +493,9 @@ const extractMemberTag =
   (member: ts.Type): O.Option<string> => {
     const tagProp = RA.head(
       RA.compact([
-        O.fromNullable(member.getProperty('_tag')),
-        O.fromNullable(member.getProperty('kind')),
-        O.fromNullable(member.getProperty('type')),
+        liftNullable(member.getProperty('_tag')),
+        liftNullable(member.getProperty('kind')),
+        liftNullable(member.getProperty('type')),
       ]),
     );
     return O.chain(readTagPropValue(input))(tagProp);
@@ -481,7 +504,7 @@ const extractMemberTag =
 const extractAdtOccurrence =
   (input: { readonly file: string; readonly checker: ts.TypeChecker }) =>
   (td: TypeDeclInfo): O.Option<TaggedAdtOccurrence> => {
-    const type = input.checker.getTypeAtLocation(td.node);
+    const type = getNodeType(input.checker)(td.node);
     const unionMembers = O.match(
       () => [],
       getUnionTypes,
@@ -498,14 +521,14 @@ const extractAdtOccurrence =
           file: input.file,
           symbol: td.name,
         }),
-    )(td.isDiscriminatedUnion && type.isUnion() && tags.length >= 2);
+    )(td.declKind === 'discriminated-union' && type.isUnion() && tags.length >= 2);
   };
 
 const collectModuleAdtOccurrences =
   (checker: ts.TypeChecker) =>
   (mod: ResolvedModuleData) =>
-    RA.filterMap(extractAdtOccurrence({ file: mod.relativePath, checker }))(
-      mod.ir.typeDeclarations,
+    RA.filterMap(extractAdtOccurrence({ file: isoRelativePath.unwrap(mod.relativePath), checker }))(
+      getModuleTypeDecls(mod),
     );
 
 const getAdtKey = (o: TaggedAdtOccurrence) => o.key;
@@ -524,12 +547,12 @@ const buildAdtHint = (input: {
   const quotedTags = RA.map(quoteSingle)(tags).join(' | ');
   const tagShapes = RA.map(toTagShape)(tags).join(' | ');
   return {
-    hintId: `missing-domain-model-adt-${input.idx + 1}`,
+    hintId: isoHintId.wrap(`missing-domain-model-adt-${input.idx + 1}`),
     category: 'missing-domain-model' as const,
     priority: 'high' as const,
     files: input.files,
     symbols,
-    evidence: `Discriminated union with identical tag set (${quotedTags}) is redefined independently in ${input.files.length} modules: ${symbols.join(', ')}.`,
+    evidence: `Discriminated union with identical tag set (${quotedTags}) is redefined independently in ${countFiles(input.files)} modules: ${symbols.join(', ')}.`,
     suggestion:
       'Consolidate these repeated discriminated unions into a single canonical shared ADT (or parametric ADT like RemoteData<E, A> / AsyncState<E, A>) so exhaustive matchers and constructors are reused.',
     suggestedSignature: O.some(`export type SharedState<A, E = string> = ${tagShapes};`),
@@ -557,7 +580,7 @@ const toAdtHint =
 
 const detectReinventedAdts = (input: MissingDomainModelInput) => {
   const occurrences = RA.chain(collectModuleAdtOccurrences(input.checker))(
-    RA.filter(isNonBarrel)(Array.from(input.dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(input.dag)),
   );
   const grouped = RNEA.groupBy(getAdtKey)(occurrences);
   const entries = Object.entries(grouped);
@@ -569,18 +592,19 @@ const detectReinventedAdts = (input: MissingDomainModelInput) => {
 const extractFieldPrimitiveOccurrence =
   (input: { readonly file: string; readonly typeName: string }) =>
   (field: IrFieldLike): O.Option<DomainPrimitiveOccurrence> => {
+    const rawName = isoFieldName.unwrap(field.name);
     const isEligible =
-      (field.isRawString || field.isRawNumber) && isDomainPrimitiveFieldName(field.name);
+      (field.kind === 'raw-string' || field.kind === 'raw-number') && isDomainPrimitiveFieldName(rawName);
     const prim = B.match(
       () => 'number' as const,
       () => 'string' as const,
-    )(field.isRawString);
+    )(field.kind === 'raw-string');
     return B.match(
       () => O.none,
       () =>
         O.some({
-          key: `${field.name}:${prim}`,
-          name: field.name,
+          key: `${rawName}:${prim}`,
+          name: rawName,
           prim,
           file: input.file,
           typeName: input.typeName,
@@ -594,10 +618,10 @@ const extractDeclPrimitiveOccurrences =
     B.match(
       () => [],
       () => RA.filterMap(extractFieldPrimitiveOccurrence({ file, typeName: td.name }))(td.fields),
-    )(!td.isNewtype);
+    )(td.declKind !== 'newtype');
 
 const collectModulePrimitiveOccurrences = (mod: ResolvedModuleData) =>
-  RA.chain(extractDeclPrimitiveOccurrences(mod.relativePath))(mod.ir.typeDeclarations);
+  RA.chain(extractDeclPrimitiveOccurrences(isoRelativePath.unwrap(mod.relativePath)))(getModuleTypeDecls(mod));
 
 const getPrimKey = (o: DomainPrimitiveOccurrence) => o.key;
 const getPrimFile = (o: DomainPrimitiveOccurrence) => o.file;
@@ -611,12 +635,12 @@ const buildPrimitiveHint = (input: {
   const brandName = toPascalCase(first.name);
   const symbols = RA.uniq(S.Eq)(sortStrings(RA.map(getPrimTypeName)(input.occs)));
   return {
-    hintId: `missing-domain-model-newtype-${first.name}`,
+    hintId: isoHintId.wrap(`missing-domain-model-newtype-${first.name}`),
     category: 'missing-domain-model' as const,
     priority: 'medium' as const,
     files: input.files,
     symbols,
-    evidence: `Raw primitive field "${first.name}: ${first.prim}" appears unbranded across ${input.files.length} modules (${input.files.join(', ')}).`,
+    evidence: `Raw primitive field "${first.name}: ${first.prim}" appears unbranded across ${countFiles(input.files)} modules (${input.files.join(', ')}).`,
     suggestion: `Extract a shared newtype-ts brand "${brandName}" in a domain primitives module so "${first.name}" values cannot be confused with arbitrary ${first.prim}s across modules.`,
     suggestedSignature: O.some(
       `export type ${brandName} = Newtype<{ readonly ${brandName}: unique symbol }, ${first.prim}>;`,
@@ -642,7 +666,7 @@ const toPrimitiveHint =
 
 const detectRepeatedDomainPrimitives = (input: MissingDomainModelInput) => {
   const occurrences = RA.chain(collectModulePrimitiveOccurrences)(
-    RA.filter(isNonBarrel)(Array.from(input.dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(input.dag)),
   );
   const grouped = RNEA.groupBy(getPrimKey)(occurrences);
   return RA.filterMap(toPrimitiveHint({ dag: input.dag, minOcc: input.minOcc }))(

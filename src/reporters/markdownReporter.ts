@@ -9,7 +9,13 @@ import type {
   ProjectDagGraph,
   ProjectModuleNode,
 } from '../model/projectReport.js';
-import type { AgentHint, AnalysisReport, DiagnosticError } from '../model/report.js';
+import type {
+  AgentHint,
+  AnalysisReport,
+  ColumnNumber,
+  DiagnosticError,
+  LineNumber,
+} from '../model/report.js';
 
 export type FormatProjectReport = (report: ProjectAnalysisReport) => string;
 
@@ -20,7 +26,7 @@ const orNoneLabel = O.getOrElse(noneLabel);
 const orUnknownLabel = O.getOrElse(unknownLabel);
 const isNonEmpty = (s: string) => s.length > 0;
 const wrapBackticks = (s: string) => `\`${s}\``;
-const formatLocation = (loc: { readonly line: number; readonly column: number }) =>
+const formatLocation = (loc: { readonly line: LineNumber; readonly column: ColumnNumber }) =>
   `L${loc.line}:${loc.column}`;
 
 const formatSuggestedSignature = (sig: string) => `\n  - Signature: \`${sig}\``;
@@ -29,8 +35,12 @@ const optionalSigPart = O.match(emptyString, formatSuggestedSignature);
 const formatErrorLine = (e: DiagnosticError) =>
   `- **[${e.ruleId}]** (${e.category}) \`${formatLocation(e.location)}\`: ${e.message}\n  - Snippet: \`${e.snippet}\`\n  - Fix: ${e.fixGuidance}`;
 
+const formatPriority = (h: { readonly priority: string }) => h.priority.toUpperCase();
+const formatResearch = (h: { readonly researchQuestions: ReadonlyArray<string> }) =>
+  h.researchQuestions.join(' | ');
+
 const formatHintLine = (h: AgentHint) =>
-  `- **[${h.priority.toUpperCase()} | ${h.category}]** \`${formatLocation(h.location)}\`: ${h.evidence}\n  - Suggestion: ${h.suggestion}${optionalSigPart(h.suggestedSignature)}\n  - Research: ${h.researchQuestions.join(' | ')}`;
+  `- **[${formatPriority(h)} | ${h.category}]** \`${formatLocation(h.location)}\`: ${h.evidence}\n  - Suggestion: ${h.suggestion}${optionalSigPart(h.suggestedSignature)}\n  - Research: ${formatResearch(h)}`;
 
 const formatSymbolsPart = (symbols: ReadonlyArray<string>) =>
   B.match(
@@ -42,13 +52,14 @@ const formatCrossFileHintLine = (h: CrossFileHint) => {
   const filesStr = RA.map(wrapBackticks)(h.files).join(', ');
   const symbolsPart = formatSymbolsPart(h.symbols);
   const sigPart = optionalSigPart(h.suggestedSignature);
-  return `- **[${h.priority.toUpperCase()} | ${h.category}]** (${filesStr}): ${h.evidence}${symbolsPart}\n  - Suggestion: ${h.suggestion}${sigPart}\n  - Research: ${h.researchQuestions.join(' | ')}`;
+  return `- **[${formatPriority(h)} | ${h.category}]** (${filesStr}): ${h.evidence}${symbolsPart}\n  - Suggestion: ${h.suggestion}${sigPart}\n  - Research: ${formatResearch(h)}`;
 };
 
-const formatStatus = B.match(
-  () => 'FAIL',
-  () => 'PASS',
-);
+const formatReportStatus = (r: AnalysisReport) =>
+  B.match(
+    () => 'FAIL',
+    () => 'PASS',
+  )(r.passed);
 
 const formatErrorSection = (errors: ReadonlyArray<DiagnosticError>) =>
   B.match(
@@ -63,7 +74,7 @@ const formatHintSection = (hints: ReadonlyArray<AgentHint>) =>
   )(hints.length === 0);
 
 const formatSingleReport = (r: AnalysisReport) => {
-  const status = formatStatus(r.passed);
+  const status = formatReportStatus(r);
   const exported = orNoneLabel(r.summary.exportedFunction);
   const sig = orUnknownLabel(r.summary.exportedSignature);
   const header = `## [${status}] ${r.filePath}\n- **Exported:** \`${exported}\` :: \`${sig}\`\n- **Errors:** ${r.summary.errorCount} | **Hints:** ${r.summary.hintCount}`;

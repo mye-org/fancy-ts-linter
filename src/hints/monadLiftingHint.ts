@@ -3,7 +3,12 @@ import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -77,13 +82,12 @@ const buildReaderThreadingHint =
       () => [],
       () => [
         {
-          hintId: 'monad-reader-threading',
+          hintId: isoHintId.wrap('monad-reader-threading'),
           category: 'monad',
           priority: 'medium',
           location: getBindingLocation(first.b),
-          evidence: `Dependency/config type (${first.depType}) is threaded across ${candidates.length} curried helpers (${RA.map(getCandidateName)(candidates).join(', ')}).`,
-          suggestion:
-            'Lift shared dependency threading into `fp-ts/Reader` or `ReaderTaskEither` (`RTE.ask` / `RTE.asks`).',
+          evidence: isoHintEvidence.wrap(`Dependency/config type (${first.depType}) is threaded across ${candidates.length} curried helpers (${RA.map(getCandidateName)(candidates).join(', ')}).`),
+          suggestion: isoHintSuggestion.wrap('Lift shared dependency threading into `fp-ts/Reader` or `ReaderTaskEither` (`RTE.ask` / `RTE.asks`).'),
           suggestedSignature: O.some(`ReaderTaskEither<${first.depType}, Error, Result>`),
           researchQuestions: [
             'Do these helpers share the same environment/dependency record across the module?',
@@ -101,7 +105,8 @@ const checkReaderThreading = (ctx: RuleContext) => {
 };
 
 const isArrayOfEffectSig = (ctx: RuleContext) => (sig: ts.Signature) =>
-  /(ReadonlyArray|Array)<.*(Option|Either|TaskEither|Task)</.test(
+  sig.getReturnType().getCallSignatures().length === 0 &&
+  /^(ReadonlyArray|Array)<.*(Option|Either|TaskEither|Task)</.test(
     renderType(ctx)(sig.getReturnType()),
   );
 
@@ -116,13 +121,12 @@ const checkBindingArrayOfEffects = (ctx: RuleContext) => (b: BindingInfo) => {
     () => [],
     () => [
       {
-        hintId: `monad-traverse-${b.name}`,
+        hintId: isoHintId.wrap(`monad-traverse-${b.name}`),
         category: 'monad',
         priority: 'medium',
         location: getBindingLocation(b),
-        evidence: `\`${b.name}\` produces an array of effects (${b.signature}).`,
-        suggestion:
-          'Use `RA.traverse(Effect.Applicative)` or `RA.sequence` to invert `ReadonlyArray<Effect<A>>` into `Effect<ReadonlyArray<A>>`.',
+        evidence: isoHintEvidence.wrap(`\`${b.name}\` produces an array of effects (${b.signature}).`),
+        suggestion: isoHintSuggestion.wrap('Use `RA.traverse(Effect.Applicative)` or `RA.sequence` to invert `ReadonlyArray<Effect<A>>` into `Effect<ReadonlyArray<A>>`.'),
         suggestedSignature: O.none,
         researchQuestions: [
           'Should this collection transform fail-fast (`E.Applicative`) or accumulate errors (`E.getApplicativeValidation`)?',

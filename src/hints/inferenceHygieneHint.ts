@@ -4,7 +4,12 @@ import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
-import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { AgentHint, BindingInfo, RuleContext, HintEvidence, HintId, HintSuggestion } from '../model/report.js';
+
+const isoHintId = iso<HintId>();
+const isoHintEvidence = iso<HintEvidence>();
+const isoHintSuggestion = iso<HintSuggestion>();
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
@@ -32,8 +37,15 @@ type BindingCheckInput = {
 const bindingLineLens = Lens.fromPath<BindingInfo>()(['location', 'line']);
 const bindingColLens = Lens.fromPath<BindingInfo>()(['location', 'column']);
 
+const sigHasTypePredicate = (checker: ts.TypeChecker) => (sig: ts.Signature) =>
+  checker.getTypePredicateOfSignature(sig) !== undefined;
+
+const typeHasTypePredicate = (checker: ts.TypeChecker) => (t: ts.Type) =>
+  RA.some(sigHasTypePredicate(checker))(t.getCallSignatures());
+
 const isEquivalentToInferred = ({ checker, declared, inferred }: EquivalenceInput) =>
   (inferred.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0 &&
+  !(typeHasTypePredicate(checker)(declared) && !typeHasTypePredicate(checker)(inferred)) &&
   checker.isTypeAssignableTo(inferred, declared) &&
   checker.isTypeAssignableTo(declared, inferred);
 
@@ -93,13 +105,12 @@ const hasComplexReturnOrWrapperType = ({ ctx, inferred }: ContextTypeInput) => {
 const makeInferenceHygieneHint = (b: BindingInfo) => {
   const hints: ReadonlyArray<AgentHint> = [
     {
-      hintId: `inference-hygiene-${b.name}`,
+      hintId: isoHintId.wrap(`inference-hygiene-${b.name}`),
       category: 'inference-hygiene',
       priority: 'low',
       location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
-      evidence: `Unexported binding \`${b.name}\` has an explicit return type or \`satisfies\` that matches TypeScript's inferred type (${b.signature}).`,
-      suggestion:
-        'Prefer type inference on simple unexported private functions; omit redundant return-type annotations / `satisfies` unless resolving a TS inference limitation.',
+      evidence: isoHintEvidence.wrap(`Unexported binding \`${b.name}\` has an explicit return type or \`satisfies\` that matches TypeScript's inferred type (${b.signature}).`),
+      suggestion: isoHintSuggestion.wrap('Prefer type inference on simple unexported private functions; omit redundant return-type annotations / `satisfies` unless resolving a TS inference limitation.'),
       suggestedSignature: O.none,
       researchQuestions: [
         `Does removing the annotation on \`${b.name}\` keep \`tsc\` passing with the same inferred type?`,
@@ -109,6 +120,11 @@ const makeInferenceHygieneHint = (b: BindingInfo) => {
   return hints;
 };
 
+const isTypePredicateArrow = (unwrapped: ts.Expression) =>
+  (ts.isArrowFunction(unwrapped) || ts.isFunctionExpression(unwrapped)) &&
+  unwrapped.type !== undefined &&
+  ts.isTypePredicateNode(unwrapped.type);
+
 const checkExprInference =
   ({ ctx, b }: BindingCheckInput) =>
   (expr: ts.Expression) => {
@@ -117,6 +133,7 @@ const checkExprInference =
     const isSkipped =
       isCurriedOrPipeline({ b, unwrapped }) ||
       isGenericFunction({ b, unwrapped }) ||
+      isTypePredicateArrow(unwrapped) ||
       hasComplexReturnOrWrapperType({ ctx, inferred });
     const declared = ctx.checker.getTypeAtLocation(b.declaration);
     const redundant =
@@ -125,7 +142,7 @@ const checkExprInference =
   };
 
 const checkPrivateInference = (ctx: RuleContext) => (b: BindingInfo) => {
-  const shouldSkip = b.isExported || (!b.hasExplicitReturnType && !b.hasSatisfies);
+  const shouldSkip = b.visibility === 'exported' || b.annotation === 'none';
   return B.match(
     constant(O.match(RA.zero<AgentHint>, checkExprInference({ ctx, b }))(b.initializer)),
     RA.zero<AgentHint>,

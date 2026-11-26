@@ -11,8 +11,16 @@ import type {
   BuiltProjectDag,
   CrossFileHint,
   ResolvedModuleData,
+  DirectoryPath,
+  LayerIndex,
+  ModuleCount,
+  RelativePath,
 } from '../model/projectReport.js';
-import type { BindingInfo, TypeInspector } from '../model/report.js';
+import type { FilePath } from '../graph/toRelativePosixPath.js';
+import type { HintId } from '../model/report.js';
+import { iso } from 'newtype-ts';
+import type { BindingInfo, SymbolName, TypeInspector } from '../model/report.js';
+const isoSymbolName = iso<SymbolName>();
 
 export type PipelineMotifInput = {
   readonly dag: BuiltProjectDag;
@@ -100,10 +108,22 @@ const detectStepEffectToken =
       input.inspector.detectEffects(input.checker.getTypeAtLocation(node)),
     )}`;
 
+const getPropName = (pa: ts.PropertyAccessExpression) => pa.name.text;
+const getModuleBindings = (m: ResolvedModuleData) => m.ir.bindings;
+const countTokens = (tokens: ReadonlyArray<string>) => tokens.length;
+const listDagModules = (dag: BuiltProjectDag) => Array.from(dag.modules.values());
+const isoHintId = iso<HintId>();
+const isoFilePath = iso<FilePath>();
+const isoRelativePath = iso<RelativePath>();
+const isoDirectoryPath = iso<DirectoryPath>();
+const isoLayerIndex = iso<LayerIndex>();
+const isoModuleCount = iso<ModuleCount>();
+const unwrapInit = (inspector: TypeInspector) => inspector.unwrapSatisfiesAndParens;
+
 const classifyMethodAccess =
   (fallback: string) =>
   (pa: ts.PropertyAccessExpression) => {
-    const method = pa.name.text;
+    const method = getPropName(pa);
     return B.match(
       () => fallback,
       () => `${getObjectName(pa.expression)}.${method}`,
@@ -126,7 +146,7 @@ const classifyCallExpr =
   };
 
 const classifyPropAccessExpr = (unwrapped: ts.PropertyAccessExpression) => {
-  const method = unwrapped.name.text;
+  const method = getPropName(unwrapped);
   return B.match(
     () =>
       B.match(
@@ -147,7 +167,7 @@ const classifyBinding = (binding: BindingInfo) =>
     () => 'ADT.match',
   )(binding.kind === 'adt-matcher');
 
-const hasBindingName = (name: string) => (b: BindingInfo) => b.name === name;
+const hasBindingName = (name: string) => (b: BindingInfo) => isoSymbolName.unwrap(b.name) === name;
 
 const classifyIdentifierExpr =
   (input: {
@@ -164,7 +184,7 @@ const classifyIdentifierExpr =
           inspector: input.inspector,
         })(unwrapped),
       classifyBinding,
-    )(RA.findFirst(hasBindingName(unwrapped.text))(input.mod.ir.bindings));
+    )(RA.findFirst(hasBindingName(unwrapped.text))(getModuleBindings(input.mod)));
 
 const classifyFlowStepToken =
   (input: {
@@ -173,7 +193,7 @@ const classifyFlowStepToken =
     readonly inspector: TypeInspector;
   }) =>
   (expr: ts.Expression): string => {
-    const unwrapped = input.inspector.unwrapSatisfiesAndParens(expr);
+    const unwrapped = unwrapInit(input.inspector)(expr);
     const fallback = detectStepEffectToken({
       prefix: 'step',
       checker: input.checker,
@@ -196,15 +216,15 @@ const classifyFlowStepToken =
 const isConcreteCombinatorToken = (token: string) =>
   !token.startsWith('step:Pure') && !token.startsWith('call:Pure');
 
-const isNonBarrel = (mod: ResolvedModuleData) => !mod.isBarrel;
-const isTargetModule = (mod: ResolvedModuleData) => mod.isTarget;
-const getRelativePath = (mod: ResolvedModuleData) => mod.relativePath;
+const isNonBarrel = (mod: ResolvedModuleData) => (mod.moduleKind !== 'barrel' && mod.moduleKind !== 'barrel-type-only');
+const isTargetModule = (mod: ResolvedModuleData) => mod.scope === 'target';
+const getRelativePath = (mod: ResolvedModuleData) => isoRelativePath.unwrap(mod.relativePath);
 
 const inSet = (set: ReadonlySet<string>) => (value: string) => set.has(value);
 
 const involvesAnyTarget = (dag: BuiltProjectDag) => (files: ReadonlyArray<string>) => {
   const targetFiles = new Set(
-    RA.map(getRelativePath)(RA.filter(isTargetModule)(Array.from(dag.modules.values()))),
+    RA.map(getRelativePath)(RA.filter(isTargetModule)(listDagModules(dag))),
   );
   return RA.some(inSet(targetFiles))(files);
 };
@@ -222,7 +242,7 @@ const buildFlowRecord =
     readonly bindingName: string;
   }) =>
   (call: ts.CallExpression): FlowRecord => ({
-    file: input.mod.relativePath,
+    file: isoRelativePath.unwrap(input.mod.relativePath),
     bindingName: input.bindingName,
     tokens: RA.map(
       classifyFlowStepToken({
@@ -245,7 +265,7 @@ const extractBindingFlow =
         mod: input.mod,
         checker: input.checker,
         inspector: input.inspector,
-        bindingName: binding.name,
+        bindingName: isoSymbolName.unwrap(binding.name),
       }),
     )(
       O.chain(
@@ -261,7 +281,7 @@ const extractModuleFlows =
   (mod: ResolvedModuleData) =>
     RA.filterMap(
       extractBindingFlow({ mod, checker: input.checker, inspector: input.inspector }),
-    )(mod.ir.bindings);
+    )(getModuleBindings(mod));
 
 const identityNum = (i: number) => i;
 const offsetBy = (base: number) => (offset: number) => base + offset;
@@ -287,11 +307,11 @@ const extractNgramsForLen =
   (flowRec: FlowRecord) =>
   (len: number) =>
     RA.filterMap(buildNgramAtStart({ flowRec, len }))(
-      RA.makeBy(flowRec.tokens.length - len + 1, identityNum),
+      RA.makeBy(countTokens(flowRec.tokens) - len + 1, identityNum),
     );
 
 const extractFlowNgrams = (flowRec: FlowRecord) => {
-  const maxLen = Math.min(flowRec.tokens.length, 6);
+  const maxLen = Math.min(countTokens(flowRec.tokens), 6);
   const lens = RA.makeBy(Math.max(0, maxLen - 2), offsetBy(3));
   return RA.chain(extractNgramsForLen(flowRec))(lens);
 };
@@ -315,7 +335,7 @@ const toMotifSummary = (
 
 const hasMinFiles = (minOcc: number) => (m: MotifSummary) => m.files.length >= minOcc;
 
-const negTokenLen = (m: MotifSummary) => -m.tokens.length;
+const negTokenLen = (m: MotifSummary) => -countTokens(m.tokens);
 const negFileCount = (m: MotifSummary) => -m.files.length;
 const byTokenLen = Ord.contramap(negTokenLen)(N.Ord);
 const byFileCount = Ord.contramap(negFileCount)(N.Ord);
@@ -343,15 +363,15 @@ const pruneSubMotifs = (sorted: ReadonlyArray<MotifSummary>) =>
 const buildMotifHint = (pair: readonly [MotifSummary, number]) => {
   const [m, idx] = pair;
   return {
-    hintId: `pipeline-motif-${idx + 1}`,
+    hintId: isoHintId.wrap(`pipeline-motif-${idx + 1}`),
     category: 'pipeline-motif' as const,
     priority: B.match(
       () => 'medium' as const,
       () => 'high' as const,
-    )(m.tokens.length >= 4 || m.files.length >= 4),
+    )(countTokens(m.tokens) >= 4 || m.files.length >= 4),
     files: m.files,
     symbols: m.symbols,
-    evidence: `Recurring ${m.tokens.length}-step pipeline motif [${m.key}] repeats across ${m.files.length} modules (${m.files.join(', ')}).`,
+    evidence: `Recurring ${countTokens(m.tokens)}-step pipeline motif [${m.key}] repeats across ${m.files.length} modules (${m.files.join(', ')}).`,
     suggestion:
       'Extract a reusable generic higher-order combinator / Kleisli pipeline factory that encapsulates this repeated step sequence, passing domain-specific predicates/mappers as arguments.',
     suggestedSignature: O.some(
@@ -378,7 +398,7 @@ export const discoverPipelineMotifs = (({
   minOcc,
 }: PipelineMotifInput): ReadonlyArray<CrossFileHint> => {
   const flows = RA.chain(extractModuleFlows({ checker, inspector }))(
-    RA.filter(isNonBarrel)(Array.from(dag.modules.values())),
+    RA.filter(isNonBarrel)(listDagModules(dag)),
   );
   const ngrams = RA.chain(extractFlowNgrams)(flows);
   const grouped = RNEA.groupBy(getNgramKey)(ngrams);

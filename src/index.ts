@@ -23,19 +23,27 @@ import {
   type CrossFileHintCategory,
   type DirectoryCluster,
   type DirectoryCohesionMetric,
+  type FileCount,
+  type ModuleCount,
+  type OccurrenceCount,
   type ProjectAnalysisReport,
   type ProjectAnalysisSummary,
   type ProjectDagGraph,
   type ProjectDagSummary,
   type ProjectEdge,
   type ProjectModuleNode,
+  type RelativePath,
   type ResolvedAnalyzeOptions,
   type ResolvedModuleData,
+  type StepCount,
 } from './model/projectReport.js';
+import { iso } from 'newtype-ts';
 import {
   buildAnalysisReport,
   type AnalysisReport,
   type AnalyzeOptions,
+  type ErrorCount,
+  type HintCount,
   type ModuleIR,
   type RuleContext,
   type TypeInspector,
@@ -111,23 +119,31 @@ const constFalse = constant(false);
 const defaultThree = constant(3);
 const emptyStrings = constant(RA.zero<string>());
 
+const isoStepCount = iso<StepCount>();
+const isoOccurrenceCount = iso<OccurrenceCount>();
+const isoModuleCount = iso<ModuleCount>();
+const isoFileCount = iso<FileCount>();
+const isoRelativePath = iso<RelativePath>();
+
 const resolveAnalyzeOptions = (options: AnalyzeOptions) => ({
   tsconfigPath: options.tsconfigPath,
-  maxFlowSteps: options.maxFlowSteps,
+  maxFlowSteps: isoStepCount.wrap(options.maxFlowSteps),
   format: options.format,
   includeGraph: O.getOrElse(constFalse)(options.includeGraph),
-  minPatternOccurrences: O.getOrElse(defaultThree)(options.minPatternOccurrences),
-  minDirModules: O.getOrElse(defaultThree)(options.minDirModules),
+  minPatternOccurrences: isoOccurrenceCount.wrap(
+    O.getOrElse(defaultThree)(options.minPatternOccurrences),
+  ),
+  minDirModules: isoModuleCount.wrap(O.getOrElse(defaultThree)(options.minDirModules)),
   excludePatterns: O.getOrElse(emptyStrings)(options.excludePatterns),
 });
 
 const toAnalyzeOptions = (options: ResolvedAnalyzeOptions) => ({
   tsconfigPath: options.tsconfigPath,
-  maxFlowSteps: options.maxFlowSteps,
+  maxFlowSteps: isoStepCount.unwrap(options.maxFlowSteps),
   format: options.format,
   includeGraph: O.some(options.includeGraph),
-  minPatternOccurrences: O.some(options.minPatternOccurrences),
-  minDirModules: O.some(options.minDirModules),
+  minPatternOccurrences: O.some(isoOccurrenceCount.unwrap(options.minPatternOccurrences)),
+  minDirModules: O.some(isoModuleCount.unwrap(options.minDirModules)),
   excludePatterns: O.some(options.excludePatterns),
 });
 
@@ -170,13 +186,16 @@ const resolveSourceFile =
       E.right<string, ts.SourceFile>,
     )(O.fromNullable(loaded.program.getSourceFile(path.resolve(fp))));
 
+const isoErrorCount = iso<ErrorCount>();
+const isoHintCount = iso<HintCount>();
+
 const getEntryReport = (entry: AnalyzedSourceEntry) => entry.report;
 const toIrMapEntry = (entry: AnalyzedSourceEntry) =>
   [entry.abs, entry.ir] as const;
 const isReportPassed = (r: AnalysisReport) => r.passed;
-const getReportErrorCount = (r: AnalysisReport) => r.summary.errorCount;
-const getReportHintCount = (r: AnalysisReport) => r.summary.hintCount;
-const getRelativePath = (m: ResolvedModuleData) => m.relativePath;
+const getReportErrorCount = (r: AnalysisReport) => isoErrorCount.unwrap(r.summary.errorCount);
+const getReportHintCount = (r: AnalysisReport) => isoHintCount.unwrap(r.summary.hintCount);
+const getRelativePath = (m: ResolvedModuleData) => isoRelativePath.unwrap(m.relativePath);
 
 const resolveCyclePath =
   (modules: ReadonlyMap<string, ResolvedModuleData>) => (filePath: string) =>
@@ -206,7 +225,7 @@ const buildReportFromEntries =
       targetFiles: expandedTargets,
       projectBaseDir: loaded.projectBaseDir,
       excludePatterns: options.excludePatterns,
-      minDirModules: options.minDirModules,
+      minDirModules: isoModuleCount.unwrap(options.minDirModules),
       preExtractedIRs,
     });
     const crossFileHints = runAllCrossFileHints({
@@ -220,12 +239,12 @@ const buildReportFromEntries =
     const totalErrors = M.concatAll(N.MonoidSum)(RA.map(getReportErrorCount)(fileReports));
     const totalFileHints = M.concatAll(N.MonoidSum)(RA.map(getReportHintCount)(fileReports));
     const summary: ProjectAnalysisSummary = {
-      totalFiles: fileReports.length,
-      passedFiles,
-      failedFiles,
-      totalErrors,
-      totalFileHints,
-      totalCrossFileHints: crossFileHints.length,
+      totalFiles: isoFileCount.wrap(fileReports.length),
+      passedFiles: isoFileCount.wrap(passedFiles),
+      failedFiles: isoFileCount.wrap(failedFiles),
+      totalErrors: isoErrorCount.wrap(totalErrors),
+      totalFileHints: isoHintCount.wrap(totalFileHints),
+      totalCrossFileHints: isoHintCount.wrap(crossFileHints.length),
     };
     const projectGraph = B.match(
       () => O.none,
