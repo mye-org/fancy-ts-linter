@@ -30,14 +30,18 @@ pnpm test
 ### CLI Usage
 
 ```bash
-node bin/fancy-ts-linter.mjs <file...> [options]
+node bin/fancy-ts-linter.mjs <file-or-dir...> [options]
 ```
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `--tsconfig <path>` | Auto-discovered | Path to `tsconfig.json` for full type resolution |
-| `--format <json\|md>` | `json` | `json` (machine-readable `AnalysisReport`) or `md` (token-efficient LLM report) |
+| `--tsconfig <path>` | Auto-discovered | Path to `tsconfig.json` for full type resolution & project DAG context |
+| `--format <json\|md>` | `json` | `json` (`ProjectAnalysisReport`) or `md` (token-efficient LLM report) |
 | `--max-flow-steps <n>` | `10` | Step-count threshold before emitting a `ddd-decomposition` hint |
+| `--include-graph` | `false` | Include full `projectGraph` (`nodes`, `edges`, `cycles`, `directories`) in output |
+| `--min-pattern-occurrences <n>` | `3` | Minimum distinct files for cross-file pattern discovery |
+| `--min-dir-modules <n>` | `3` | Minimum non-barrel modules in a directory for junk-drawer cohesion analysis |
+| `--exclude <pattern>` | `[]` | Repeatable glob or substring path pattern to exclude |
 | `--help` | `false` | Show CLI usage |
 
 | Exit Code | Meaning |
@@ -129,18 +133,36 @@ export const priceOrder = flow(
 | `declarative-combinator` | Self-recursion or manual `reduce` | Suggests `RA.filterMap`, `RA.partitionMap`, `Monoid.concatAll` |
 | `inference-hygiene` | Simple unexported bindings with redundant return types/`satisfies` | Suggests omitting redundant annotations (exempts curried, generic, and HKT/complex-union helpers) |
 
+### Cross-File DAG & Pattern Discovery Hints (Tier 2, `exit 0`)
+
+Built automatically from the `ts.Program` project graph (for both single-file and multi-file/directory invocations; test/spec/fixture files are excluded from ambient DAG metrics unless explicitly targeted):
+
+| Hint Category | Graph / Structural Signal | Guidance Provided |
+| :--- | :--- | :--- |
+| `junk-drawer-directory` | Name-agnostic low-cohesion directory (`clusters`, disjoint callers, heterogeneous fan-out or mixed domain types; exempts cohesive pure primitive libraries) | Suggests splitting by domain/capability and co-locating single-caller modules |
+| `misplaced-scope` | Module in a shared/sibling folder whose callers all sit in one narrower feature subtree (LCA) or a single caller file | Suggests co-locating to the callers' LCA directory |
+| `dependency-cycle` | Tarjan Strongly Connected Component (SCC) of size ≥ 2 breaking DAG acyclicity | Reports concrete witness cycle and suggests leaf type extraction or `Reader`/inversion |
+| `hub-bottleneck` | High fan-in combined with heterogeneous external/cross-directory fan-out | Suggests separating pure domain transformations from external adapters |
+| `missing-domain-model` | Repeated field clusters, reinvented ADTs with identical tag sets, or repeated raw primitive domain fields across files | Suggests canonical Value Objects, shared ADTs, or shared `newtype-ts` brands |
+| `pipeline-motif` | Recurring `flow(...)` step sequences / `fp-ts` combinator chains across files | Suggests reusable generic combinator / Kleisli pipeline abstractions |
+| `generic-abstraction` | Monomorphic types sharing the same parameterized skeleton over distinct domain types, or ad-hoc `Semigroup`/`Monoid`/`Eq`/`Ord` shapes | Suggests parametric generic data types (`Paginated<T>`, etc.) and `fp-ts` typeclass instances |
+| `environment-threading` | Same env/config/client dependency threaded across connected modules in the call DAG | Suggests `Reader<Env, A>` or `ReaderTaskEither<Env, E, A>` |
+| `architectural-motif` | Parallel same-signature domain modules, pure-to-I/O effect leakage, or shared cross-file nested access paths | Suggests Strategy/Registry dispatch, Functional Core / Imperative Shell, or shared `monocle-ts` Optics |
+
 ---
 
 ## Project Structure
 
 | Path | Purpose |
 | :--- | :--- |
-| `src/index.ts` | Public library API (`analyzeFiles`) |
-| `src/cli.ts` & `bin/fancy-ts-linter.mjs` | CLI argument parsing and exit-code handling |
+| `src/index.ts` | Public library API (`analyzeFiles` returning unified `ProjectAnalysisReport`) |
+| `src/cli.ts` & `bin/fancy-ts-linter.mjs` | CLI argument parsing, directory support, and exit-code handling |
 | `src/compiler/` | `tsconfig.json` loader, `tsc` diagnostics, TypeChecker predicates |
-| `src/ir/moduleGraph.ts` | Module IR and `TypeFlowGraph` extractor |
+| `src/ir/moduleGraph.ts` | Single-file Module IR and `TypeFlowGraph` extractor |
+| `src/graph/` | File discovery, exclusions, and full Project DAG builder (Tarjan SCC, layering, directory cohesion) |
+| `src/crossFile/` | Cross-file DAG smell detectors & repeating pattern/abstraction discovery engine |
 | `src/rules/` | Tier 1 hard-error rule implementations |
-| `src/hints/` | Tier 2 AI hint detectors |
-| `src/reporters/` | JSON and Markdown output formatters |
+| `src/hints/` | Single-file Tier 2 AI hint detectors |
+| `src/reporters/` | Unified `ProjectAnalysisReport` JSON and Markdown formatters |
 | `test/fixtures/canonical/` | Golden canonical FP modules (0 Tier 1 errors) |
 | `test/fixtures/violations/` | Imperative & hint-triggering test fixtures |

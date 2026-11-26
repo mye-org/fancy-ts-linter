@@ -16,6 +16,7 @@ export type LoadProgramInput = {
 export type LoadedProgram = {
   readonly program: ts.Program;
   readonly checker: ts.TypeChecker;
+  readonly projectBaseDir: string;
   readonly getTscErrors: (sf: ts.SourceFile) => ReadonlyArray<DiagnosticError>;
 };
 
@@ -88,11 +89,14 @@ const resolveParsedConfig = (input: LoadProgramInput) =>
 
 const dedupePaths = RA.uniq(S.Eq);
 
-const toLoadedProgram = (program: ts.Program): LoadedProgram => ({
-  program,
-  checker: program.getTypeChecker(),
-  getTscErrors: collectTscErrorsForFile(program),
-});
+const toLoadedProgram =
+  (projectBaseDir: string) =>
+  (program: ts.Program): LoadedProgram => ({
+    program,
+    checker: program.getTypeChecker(),
+    projectBaseDir,
+    getTscErrors: collectTscErrorsForFile(program),
+  });
 
 const createProgramFromOptions =
   (options: ts.CompilerOptions) =>
@@ -103,13 +107,13 @@ const createProgramFromOptions =
     });
 
 const buildProgramWith =
-  (filePaths: ReadonlyArray<string>) =>
+  (filePaths: ReadonlyArray<string>, projectBaseDir: string) =>
   (parsed: ts.ParsedCommandLine): LoadedProgram =>
     flow(
       RA.map(resolveAbsolutePath),
       (absTargets) => dedupePaths([...parsed.fileNames, ...absTargets]),
       createProgramFromOptions(parsed.options),
-      toLoadedProgram,
+      toLoadedProgram(projectBaseDir),
     )(filePaths);
 
 const getDiagLength = (diag: ts.Diagnostic) =>
@@ -180,8 +184,16 @@ const ensureNonEmptyTargets = (input: LoadProgramInput): E.Either<string, LoadPr
     constant(E.left('No target TypeScript files provided.')),
   )(RA.isEmpty(input.filePaths));
 
+const resolveProjectBaseDir = (input: LoadProgramInput): string =>
+  O.match(
+    () => path.dirname(path.resolve(input.filePaths[0] ?? process.cwd())),
+    (cfgPath: string) => path.dirname(cfgPath),
+  )(resolveConfigPath(input));
+
 const loadFromValidInput = (input: LoadProgramInput): E.Either<string, LoadedProgram> =>
-  E.map(buildProgramWith(input.filePaths))(resolveParsedConfig(input));
+  E.map(buildProgramWith(input.filePaths, resolveProjectBaseDir(input)))(
+    resolveParsedConfig(input),
+  );
 
 export const loadTargetProgram = flow(
   ensureNonEmptyTargets,

@@ -18,7 +18,7 @@ const analyzeOne = (relPath: string) => {
   if (E.isLeft(res)) {
     throw new Error(`Unexpected Left: ${res.left}`);
   }
-  const report = res.right[0];
+  const report = res.right.files[0];
   if (report === undefined) {
     throw new Error('Expected 1 report');
   }

@@ -105,6 +105,10 @@ export type AnalyzeOptions = {
   readonly tsconfigPath: O.Option<string>;
   readonly maxFlowSteps: number;
   readonly format: OutputFormat;
+  readonly includeGraph?: boolean;
+  readonly minPatternOccurrences?: number;
+  readonly minDirModules?: number;
+  readonly excludePatterns?: ReadonlyArray<string>;
 };
 
 export type ImportInfo = {

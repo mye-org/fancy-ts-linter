@@ -26,10 +26,15 @@ export type ExtractModuleIRInput = {
 
 export type ExtractModuleIR = (input: ExtractModuleIRInput) => ModuleIR;
 
-const collectNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts.Node> => [
-  node,
-  ...RA.chain(collectNodes(sf))(node.getChildren(sf)),
-];
+const collectNodes = (_sf: ts.SourceFile) => (root: ts.Node): ReadonlyArray<ts.Node> => {
+  const out: ts.Node[] = [];
+  const visit = (n: ts.Node): void => {
+    out.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(root);
+  return out;
+};
 
 const hasExportModifier = (node: ts.HasModifiers): boolean =>
   O.exists(

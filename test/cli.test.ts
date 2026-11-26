@@ -12,9 +12,21 @@ describe('CLI runner & reporters', () => {
     ]);
     expect(res.exitCode).toBe(0);
     expect(res.stderr).toBe('');
-    const parsed = JSON.parse(res.stdout) as { passed: boolean; summary: { errorCount: number } };
+    const parsed = JSON.parse(res.stdout) as {
+      passed: boolean;
+      summary: { totalErrors: number; totalFiles: number };
+      files: Array<{ passed: boolean; summary: { errorCount: number } }>;
+      projectGraphSummary: { analyzedModuleCount: number };
+      projectGraph?: unknown;
+      crossFileHints: unknown[];
+    };
     expect(parsed.passed).toBe(true);
-    expect(parsed.summary.errorCount).toBe(0);
+    expect(parsed.summary.totalErrors).toBe(0);
+    expect(parsed.summary.totalFiles).toBe(1);
+    expect(parsed.files[0]?.summary.errorCount).toBe(0);
+    expect(parsed.projectGraphSummary.analyzedModuleCount).toBeGreaterThanOrEqual(1);
+    expect(parsed.projectGraph).toBeUndefined();
+    expect(Array.isArray(parsed.crossFileHints)).toBe(true);
   });
 
   it('returns exitCode 1 and Markdown report for violation fixture', () => {
@@ -28,6 +40,7 @@ describe('CLI runner & reporters', () => {
     expect(res.exitCode).toBe(1);
     expect(res.stdout).toContain('## [FAIL]');
     expect(res.stdout).toContain('### Blocking Errors');
+    expect(res.stdout).toContain('## Project DAG & Cross-File Insights');
   });
 
   it('returns exitCode 2 when no files are provided', () => {

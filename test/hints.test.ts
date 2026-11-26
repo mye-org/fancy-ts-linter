@@ -18,7 +18,7 @@ const analyzeOne = (relPath: string) => {
   if (E.isLeft(res)) {
     throw new Error(`Unexpected Left: ${res.left}`);
   }
-  return res.right[0]!;
+  return res.right.files[0]!;
 };
 
 describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
@@ -43,7 +43,7 @@ describe('Tier 2 AI Hint Detectors & Type-Flow Graph', () => {
     if (E.isLeft(res)) {
       throw new Error(res.left);
     }
-    const report = res.right[0]!;
+    const report = res.right.files[0]!;
     expect(report.passed).toBe(true);
     const dddHints = report.hints.filter((h) => h.category === 'ddd-decomposition');
     expect(dddHints.length).toBeGreaterThanOrEqual(1);

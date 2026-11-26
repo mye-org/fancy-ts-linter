@@ -1,15 +1,31 @@
-import { constant, flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
-import * as RA from 'fp-ts/lib/ReadonlyArray.js';
+import type {
+  CrossFileHint,
+  ProjectAnalysisReport,
+  ProjectDagGraph,
+  ProjectModuleNode,
+} from '../model/projectReport.js';
 import type { AgentHint, AnalysisReport, TypeFlowNode } from '../model/report.js';
 
-export type FormatReports = (reports: ReadonlyArray<AnalysisReport>) => string;
+export type FormatProjectReport = (report: ProjectAnalysisReport) => string;
 
 const serializeHint = (h: AgentHint) => ({
   hintId: h.hintId,
   category: h.category,
   priority: h.priority,
   location: h.location,
+  evidence: h.evidence,
+  suggestion: h.suggestion,
+  ...(O.isSome(h.suggestedSignature) ? { suggestedSignature: h.suggestedSignature.value } : {}),
+  researchQuestions: h.researchQuestions,
+});
+
+const serializeCrossFileHint = (h: CrossFileHint) => ({
+  hintId: h.hintId,
+  category: h.category,
+  priority: h.priority,
+  files: h.files,
+  symbols: h.symbols,
   evidence: h.evidence,
   suggestion: h.suggestion,
   ...(O.isSome(h.suggestedSignature) ? { suggestedSignature: h.suggestedSignature.value } : {}),
@@ -24,29 +40,63 @@ const serializeNode = (n: TypeFlowNode) => ({
   ...(O.isSome(n.stepCount) ? { stepCount: n.stepCount.value } : {}),
 });
 
-const serializeReport = (r: AnalysisReport) => ({
+const serializeFileReport = (r: AnalysisReport) => ({
   filePath: r.filePath,
   passed: r.passed,
   summary: {
     errorCount: r.summary.errorCount,
     hintCount: r.summary.hintCount,
-    exportedFunction: O.getOrElse(constant(''))(r.summary.exportedFunction),
-    exportedSignature: O.getOrElse(constant(''))(r.summary.exportedSignature),
+    exportedFunction: O.getOrElse(() => '')(r.summary.exportedFunction),
+    exportedSignature: O.getOrElse(() => '')(r.summary.exportedSignature),
   },
   errors: r.errors,
-  hints: RA.map(serializeHint)(r.hints),
+  hints: r.hints.map(serializeHint),
   typeFlowGraph: {
-    nodes: RA.map(serializeNode)(r.typeFlowGraph.nodes),
+    nodes: r.typeFlowGraph.nodes.map(serializeNode),
     edges: r.typeFlowGraph.edges,
   },
 });
 
-const serializeAll = (reports: ReadonlyArray<AnalysisReport>) =>
-  reports.length === 1 ? serializeReport(reports[0]!) : RA.map(serializeReport)(reports);
+const serializeProjectNode = (n: ProjectModuleNode) => ({
+  filePath: n.filePath,
+  relativePath: n.relativePath,
+  directory: n.directory,
+  isTarget: n.isTarget,
+  isBarrel: n.isBarrel,
+  isTypeOnlyModule: n.isTypeOnlyModule,
+  isEntrypoint: n.isEntrypoint,
+  exportedFunction: O.getOrElse(() => '')(n.exportedFunction),
+  exportedSignature: O.getOrElse(() => '')(n.exportedSignature),
+  effects: n.effects,
+  inDegree: n.inDegree,
+  outDegree: n.outDegree,
+  transitiveDependencyCount: n.transitiveDependencyCount,
+  externalDependencies: n.externalDependencies,
+  domainExternalDependencies: n.domainExternalDependencies,
+  referencedDomainTypes: n.referencedDomainTypes,
+  layer: n.layer,
+});
 
-const stringifyPretty = (data: unknown) => JSON.stringify(data, null, 2);
+const serializeProjectGraph = (g: ProjectDagGraph) => ({
+  rootDir: g.rootDir,
+  nodes: g.nodes.map(serializeProjectNode),
+  edges: g.edges,
+  cycles: g.cycles,
+  directories: g.directories,
+});
 
-export const formatJsonReports = flow(
-  serializeAll,
-  stringifyPretty,
-) satisfies FormatReports;
+export const formatJsonReports: FormatProjectReport = (report) =>
+  JSON.stringify(
+    {
+      passed: report.passed,
+      summary: report.summary,
+      files: report.files.map(serializeFileReport),
+      projectGraphSummary: report.projectGraphSummary,
+      ...(report.projectGraph !== undefined
+        ? { projectGraph: serializeProjectGraph(report.projectGraph) }
+        : {}),
+      crossFileHints: report.crossFileHints.map(serializeCrossFileHint),
+    },
+    null,
+    2,
+  );
