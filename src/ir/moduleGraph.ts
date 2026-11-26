@@ -1,8 +1,10 @@
 import { constant, flow } from 'fp-ts/lib/function.js';
 import * as B from 'fp-ts/lib/boolean.js';
+import * as Eq from 'fp-ts/lib/Eq.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
+import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
 import { match } from 'ts-pattern';
 import type {
@@ -26,67 +28,116 @@ export type ExtractModuleIRInput = {
 
 export type ExtractModuleIR = (input: ExtractModuleIRInput) => ModuleIR;
 
-const collectNodes = (_sf: ts.SourceFile) => (root: ts.Node): ReadonlyArray<ts.Node> => {
-  const out: ts.Node[] = [];
-  const visit = (n: ts.Node): void => {
-    out.push(n);
-    ts.forEachChild(n, visit);
-  };
-  visit(root);
-  return out;
+type ClassifyContext = {
+  readonly sf: ts.SourceFile;
+  readonly inspector: TypeInspector;
+  readonly isExported: boolean;
+  readonly type: ts.Type;
 };
 
-const hasExportModifier = (node: ts.HasModifiers): boolean =>
-  O.exists(
-    RA.some((m: ts.ModifierLike) => m.kind === ts.SyntaxKind.ExportKeyword),
-  )(O.fromNullable(ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined));
+type BindingContext = {
+  readonly sourceFile: ts.SourceFile;
+  readonly checker: ts.TypeChecker;
+  readonly inspector: TypeInspector;
+  readonly isExported: boolean;
+};
 
-const getStringLiteralText = (expr: ts.Expression): string =>
-  ts.isStringLiteral(expr) ? expr.text : expr.getText();
+type EdgeContext = {
+  readonly bindingName: string;
+  readonly bindingNames: ReadonlyArray<string>;
+};
 
-const readNamedBindingText = (spec: ts.ImportSpecifier): string => spec.name.text;
+const namedNodeText = Lens.fromPath<{ readonly name: ts.Identifier }>()(['name', 'text']);
+const sourceFileStatements = Lens.fromProp<ts.SourceFile>()('statements');
 
-const extractNamedImports = (clause: ts.ImportClause): ReadonlyArray<string> =>
-  O.match(
-    constant([] as ReadonlyArray<string>),
-    (nb: ts.NamedImportBindings) =>
-      ts.isNamedImports(nb)
-        ? RA.map(readNamedBindingText)(nb.elements)
-        : ([] as ReadonlyArray<string>),
-  )(O.fromNullable(clause.namedBindings));
-
-const extractNamespaceImport = (clause: ts.ImportClause): O.Option<string> =>
-  O.chain((nb: ts.NamedImportBindings) =>
-    ts.isNamespaceImport(nb) ? O.some(nb.name.text) : O.none,
-  )(O.fromNullable(clause.namedBindings));
-
-const toImportInfo = (stmt: ts.ImportDeclaration): ImportInfo => ({
-  moduleSpecifier: getStringLiteralText(stmt.moduleSpecifier),
-  defaultImport: O.chain((c: ts.ImportClause) =>
-    O.map((id: ts.Identifier) => id.text)(O.fromNullable(c.name)),
-  )(O.fromNullable(stmt.importClause)),
-  namespaceImport: O.chain(extractNamespaceImport)(O.fromNullable(stmt.importClause)),
-  namedImports: O.match(
-    constant([] as ReadonlyArray<string>),
-    extractNamedImports,
-  )(O.fromNullable(stmt.importClause)),
-  isTypeOnly: O.exists((c: ts.ImportClause) => c.isTypeOnly)(O.fromNullable(stmt.importClause)),
+const typeFlowEdgeEq: Eq.Eq<TypeFlowEdge> = Eq.struct({
+  from: S.Eq,
+  to: S.Eq,
+  role: S.Eq,
 });
 
-const extractImports = (sf: ts.SourceFile): ReadonlyArray<ImportInfo> =>
+const stepCollectNodes =
+  ({ sf, tail }: { readonly sf: ts.SourceFile; readonly tail: ReadonlyArray<ts.Node> }) =>
+  (head: ts.Node): readonly [ts.Node, ReadonlyArray<ts.Node>] =>
+    [head, [...tail, ...head.getChildren(sf)]];
+
+const unfoldNodes =
+  (sf: ts.SourceFile) =>
+  (queue: ReadonlyArray<ts.Node>): O.Option<readonly [ts.Node, ReadonlyArray<ts.Node>]> =>
+    O.map(stepCollectNodes({ sf, tail: RA.dropLeft(1)(queue) }))(RA.head(queue));
+
+const collectNodes = (sf: ts.SourceFile) => (root: ts.Node) =>
+  RA.unfold([root], unfoldNodes(sf));
+
+const isExportKeyword = (m: ts.ModifierLike) => m.kind === ts.SyntaxKind.ExportKeyword;
+
+const getModifiersOpt = (node: ts.HasModifiers) => O.fromNullable(ts.getModifiers(node));
+
+const hasExportModifier = (node: ts.HasModifiers) =>
+  O.exists(RA.some(isExportKeyword))(
+    O.chain(getModifiersOpt)(O.fromPredicate(ts.canHaveModifiers)(node)),
+  );
+
+const readStringLiteralText = (expr: ts.StringLiteral) => expr.text;
+const readExprText = (expr: ts.Expression) => expr.getText();
+
+const getStringLiteralText = (expr: ts.Expression) =>
+  match(expr)
+    .when(ts.isStringLiteral, readStringLiteralText)
+    .otherwise(readExprText);
+
+const readNamedBindingText = (spec: ts.ImportSpecifier) => namedNodeText.get(spec);
+
+const mapNamedImports = (nb: ts.NamedImports) => RA.map(readNamedBindingText)(nb.elements);
+
+const extractNamedImportsFromBindings = (nb: ts.NamedImportBindings) =>
+  match(nb)
+    .when(ts.isNamedImports, mapNamedImports)
+    .otherwise(constant(RA.empty));
+
+const extractNamedImports = (clause: ts.ImportClause) =>
+  O.match(
+    constant(RA.empty),
+    extractNamedImportsFromBindings,
+  )(O.fromNullable(clause.namedBindings));
+
+const readNamespaceName = (nb: ts.NamespaceImport) => namedNodeText.get(nb);
+
+const extractNamespaceFromBindings = (nb: ts.NamedImportBindings) =>
+  O.map(readNamespaceName)(O.fromPredicate(ts.isNamespaceImport)(nb));
+
+const extractNamespaceImport = (clause: ts.ImportClause): O.Option<string> =>
+  O.chain(extractNamespaceFromBindings)(O.fromNullable(clause.namedBindings));
+
+const readIdentifierText = (id: ts.Identifier) => id.text;
+
+const readClauseDefaultImport = (c: ts.ImportClause) =>
+  O.map(readIdentifierText)(O.fromNullable(c.name));
+
+const readClauseIsTypeOnly = (c: ts.ImportClause) => c.isTypeOnly;
+
+const toImportInfo = (stmt: ts.ImportDeclaration) => {
+  const clauseOpt = O.fromNullable(stmt.importClause);
+  return {
+    moduleSpecifier: getStringLiteralText(stmt.moduleSpecifier),
+    defaultImport: O.chain(readClauseDefaultImport)(clauseOpt),
+    namespaceImport: O.chain(extractNamespaceImport)(clauseOpt),
+    namedImports: O.match(constant(RA.empty), extractNamedImports)(clauseOpt),
+    isTypeOnly: O.exists(readClauseIsTypeOnly)(clauseOpt),
+  };
+};
+
+const extractImports = (sf: ts.SourceFile) =>
   flow(
     RA.filter(ts.isImportDeclaration),
     RA.map(toImportInfo),
-  )(sf.statements);
+  )(sourceFileStatements.get(sf));
 
-const isBooleanType = (t: ts.Type): boolean =>
-  (t.flags & ts.TypeFlags.BooleanLike) !== 0;
+const isBooleanType = (t: ts.Type) => (t.flags & ts.TypeFlags.BooleanLike) !== 0;
 
-const isRawStringType = (t: ts.Type): boolean =>
-  (t.flags & ts.TypeFlags.StringLike) !== 0;
+const isRawStringType = (t: ts.Type) => (t.flags & ts.TypeFlags.StringLike) !== 0;
 
-const isRawNumberType = (t: ts.Type): boolean =>
-  (t.flags & ts.TypeFlags.NumberLike) !== 0;
+const isRawNumberType = (t: ts.Type) => (t.flags & ts.TypeFlags.NumberLike) !== 0;
 
 const propertySymbolToField =
   ({
@@ -114,17 +165,16 @@ const propertySymbolToField =
     };
   };
 
-const isDiscriminatedUnionType = (type: ts.Type): boolean =>
-  type.isUnion() &&
-  RA.every((member: ts.Type) =>
-    RA.some((p: ts.Symbol) => p.getName() === '_tag' || p.getName() === 'kind' || p.getName() === 'type')(
-      member.getProperties(),
-    ),
-  )(type.types);
+const isDiscriminantProp = (p: ts.Symbol) =>
+  p.getName() === '_tag' || p.getName() === 'kind' || p.getName() === 'type';
 
-const isTypeOrInterfaceDecl = (
-  stmt: ts.Statement,
-): stmt is ts.TypeAliasDeclaration | ts.InterfaceDeclaration =>
+const hasDiscriminantProp = (member: ts.Type) =>
+  RA.some(isDiscriminantProp)(member.getProperties());
+
+const isDiscriminatedUnionType = (type: ts.Type) =>
+  type.isUnion() && RA.every(hasDiscriminantProp)(type.types);
+
+const isTypeOrInterfaceDecl = (stmt: ts.Statement) =>
   ts.isTypeAliasDeclaration(stmt) || ts.isInterfaceDeclaration(stmt);
 
 const toTypeDeclInfo =
@@ -132,7 +182,7 @@ const toTypeDeclInfo =
   (node: ts.TypeAliasDeclaration | ts.InterfaceDeclaration): TypeDeclInfo => {
     const type = checker.getTypeAtLocation(node);
     return {
-      name: node.name.text,
+      name: namedNodeText.get(node),
       isExported: hasExportModifier(node),
       isNewtype: inspector.isNewtypeBrand(type),
       isDiscriminatedUnion: isDiscriminatedUnionType(type),
@@ -144,11 +194,11 @@ const toTypeDeclInfo =
     };
   };
 
-const extractTypeDeclarations = (input: ExtractModuleIRInput): ReadonlyArray<TypeDeclInfo> =>
+const extractTypeDeclarations = (input: ExtractModuleIRInput) =>
   flow(
     RA.filter(isTypeOrInterfaceDecl),
     RA.map(toTypeDeclInfo(input)),
-  )(input.sourceFile.statements);
+  )(sourceFileStatements.get(input.sourceFile));
 
 const containsTsPatternMatch = ({
   sf,
@@ -158,7 +208,65 @@ const containsTsPatternMatch = ({
   readonly sf: ts.SourceFile;
   readonly inspector: TypeInspector;
   readonly expr: ts.Expression;
-}): boolean => RA.some(inspector.isTsPatternMatch)(collectNodes(sf)(expr));
+}) => RA.some(inspector.isTsPatternMatch)(collectNodes(sf)(expr));
+
+const isExportedFlowCall =
+  ({ inspector, isExported }: { readonly inspector: TypeInspector; readonly isExported: boolean }) =>
+  (e: ts.Expression) =>
+    inspector.isFlowCall(e) && isExported;
+
+const containsMatchPred =
+  ({ sf, inspector }: { readonly sf: ts.SourceFile; readonly inspector: TypeInspector }) =>
+  (e: ts.Expression) =>
+    containsTsPatternMatch({ sf, inspector, expr: e });
+
+const isExportedUnaryIdentifier =
+  ({
+    inspector,
+    isExported,
+    type,
+  }: {
+    readonly inspector: TypeInspector;
+    readonly isExported: boolean;
+    readonly type: ts.Type;
+  }) =>
+  (e: ts.Expression) =>
+    isExported && ts.isIdentifier(e) && inspector.isUnaryFunctionType(type);
+
+const isAtMostUnarySig = (s: ts.Signature) => s.getParameters().length <= 1;
+
+const classifyCallExpr =
+  ({ inspector, type }: { readonly inspector: TypeInspector; readonly type: ts.Type }) =>
+  (e: ts.CallExpression): NodeKind =>
+    B.match(
+      constant<NodeKind>('other'),
+      constant<NodeKind>('partial-app'),
+    )(
+      (inspector.isUnaryFunctionType(type) ||
+        (type.getCallSignatures().length > 0 &&
+          RA.every(isAtMostUnarySig)(type.getCallSignatures()))) &&
+        !inspector.isFlowCall(e),
+    );
+
+const classifyInitExpr =
+  ({ sf, inspector, isExported, type }: ClassifyContext) =>
+  (initExpr: ts.Expression): NodeKind =>
+    match(inspector.unwrapSatisfiesAndParens(initExpr))
+      .when(isExportedFlowCall({ inspector, isExported }), constant<NodeKind>('exported-flow'))
+      .when(inspector.isFlowCall, constant<NodeKind>('sub-flow'))
+      .when(constant(inspector.isOpticType(type)), constant<NodeKind>('optic'))
+      .when(
+        constant(inspector.isTypeclassInstance(type)),
+        constant<NodeKind>('typeclass-instance'),
+      )
+      .when(containsMatchPred({ sf, inspector }), constant<NodeKind>('adt-matcher'))
+      .when(ts.isArrowFunction, constant<NodeKind>('leaf-fn'))
+      .when(
+        isExportedUnaryIdentifier({ inspector, isExported, type }),
+        constant<NodeKind>('leaf-fn'),
+      )
+      .when(ts.isCallExpression, classifyCallExpr({ inspector, type }))
+      .otherwise(constant<NodeKind>('other'));
 
 const classifyBindingKind = ({
   sf,
@@ -166,104 +274,176 @@ const classifyBindingKind = ({
   isExported,
   type,
   initOpt,
-}: {
-  readonly sf: ts.SourceFile;
-  readonly inspector: TypeInspector;
-  readonly isExported: boolean;
-  readonly type: ts.Type;
-  readonly initOpt: O.Option<ts.Expression>;
-}): NodeKind =>
+}: ClassifyContext & { readonly initOpt: O.Option<ts.Expression> }): NodeKind =>
   O.match(
     constant<NodeKind>('other'),
-    (initExpr: ts.Expression): NodeKind => {
-      const unwrapped = inspector.unwrapSatisfiesAndParens(initExpr);
-      return match(unwrapped)
-        .when(
-          (e) => inspector.isFlowCall(e) && isExported,
-          constant<NodeKind>('exported-flow'),
-        )
-        .when(inspector.isFlowCall, constant<NodeKind>('sub-flow'))
-        .when(constant(inspector.isOpticType(type)), constant<NodeKind>('optic'))
-        .when(
-          constant(inspector.isTypeclassInstance(type)),
-          constant<NodeKind>('typeclass-instance'),
-        )
-        .when(
-          (e) => containsTsPatternMatch({ sf, inspector, expr: e }),
-          constant<NodeKind>('adt-matcher'),
-        )
-        .when(ts.isArrowFunction, constant<NodeKind>('leaf-fn'))
-        .when(
-          (e) => isExported && ts.isIdentifier(e) && inspector.isUnaryFunctionType(type),
-          constant<NodeKind>('leaf-fn'),
-        )
-        .when(ts.isCallExpression, (e) =>
-          (inspector.isUnaryFunctionType(type) ||
-            (type.getCallSignatures().length > 0 &&
-              RA.every((s: ts.Signature) => s.getParameters().length <= 1)(
-                type.getCallSignatures(),
-              ))) &&
-          !inspector.isFlowCall(e)
-            ? 'partial-app'
-            : 'other',
-        )
-        .otherwise(constant<NodeKind>('other'));
-    },
+    classifyInitExpr({ sf, inspector, isExported, type }),
   )(initOpt);
 
-const countFlowSteps = (inspector: TypeInspector) => (initOpt: O.Option<ts.Expression>): O.Option<number> =>
-  O.chain((expr: ts.Expression) => {
-    const unwrapped = inspector.unwrapSatisfiesAndParens(expr);
-    return ts.isCallExpression(unwrapped) && inspector.isFlowCall(unwrapped)
-      ? O.some(unwrapped.arguments.length)
-      : O.none;
-  })(initOpt);
-
-const hasExplicitReturnAnnotation =
+const isFlowCallExpr =
   (inspector: TypeInspector) =>
-  (initOpt: O.Option<ts.Expression>): boolean =>
-    O.exists((expr: ts.Expression) => {
-      const unwrapped = inspector.unwrapSatisfiesAndParens(expr);
-      return ts.isArrowFunction(unwrapped) && unwrapped.type !== undefined;
-    })(initOpt);
+  (expr: ts.Expression): expr is ts.CallExpression =>
+    ts.isCallExpression(expr) && inspector.isFlowCall(expr);
+
+const readCallArgCount = (expr: ts.CallExpression) => expr.arguments.length;
+
+const readFlowStepCount = (inspector: TypeInspector) => (expr: ts.Expression) =>
+  O.map(readCallArgCount)(
+    O.fromPredicate(isFlowCallExpr(inspector))(inspector.unwrapSatisfiesAndParens(expr)),
+  );
+
+const countFlowSteps = (inspector: TypeInspector) => O.chain(readFlowStepCount(inspector));
+
+const hasArrowReturnType = (inspector: TypeInspector) => (expr: ts.Expression) => {
+  const unwrapped = inspector.unwrapSatisfiesAndParens(expr);
+  return ts.isArrowFunction(unwrapped) && unwrapped.type !== undefined;
+};
+
+const hasExplicitReturnAnnotation = (inspector: TypeInspector) =>
+  O.exists(hasArrowReturnType(inspector));
+
+type IdentDeclPair = {
+  readonly decl: ts.VariableDeclaration;
+  readonly ident: ts.Identifier;
+};
+
+const pairDeclWithIdent =
+  (decl: ts.VariableDeclaration) =>
+  (ident: ts.Identifier): IdentDeclPair => ({ decl, ident });
+
+const extractIdentDecl = (decl: ts.VariableDeclaration) =>
+  O.map(pairDeclWithIdent(decl))(O.fromPredicate(ts.isIdentifier)(decl.name));
+
+const buildIdentBinding =
+  ({
+    sourceFile,
+    checker,
+    inspector,
+    stmt,
+    isExported,
+  }: BindingContext & { readonly stmt: ts.VariableStatement }) =>
+  ({ decl, ident }: IdentDeclPair): ReadonlyArray<BindingInfo> => {
+    const initOpt = O.fromNullable(decl.initializer);
+    const type = checker.getTypeAtLocation(decl);
+    const hasSatisfies = O.exists(ts.isSatisfiesExpression)(initOpt);
+    const hasExplicitReturn =
+      decl.type !== undefined || hasExplicitReturnAnnotation(inspector)(initOpt);
+    return [
+      {
+        name: ident.text,
+        isExported,
+        kind: classifyBindingKind({ sf: sourceFile, inspector, isExported, type, initOpt }),
+        hasSatisfies,
+        hasExplicitReturnType: hasExplicitReturn,
+        signature: inspector.formatType(type),
+        effects: inspector.detectEffects(type),
+        stepCount: countFlowSteps(inspector)(initOpt),
+        location: inspector.getLocation(sourceFile)(decl),
+        declaration: decl,
+        statement: stmt,
+        initializer: initOpt,
+      },
+    ];
+  };
+
+const buildBindingFromDecl =
+  (ctx: BindingContext & { readonly stmt: ts.VariableStatement }) =>
+  (decl: ts.VariableDeclaration): ReadonlyArray<BindingInfo> =>
+    O.match(
+      constant(RA.empty),
+      buildIdentBinding(ctx),
+    )(extractIdentDecl(decl));
 
 const statementToBindings =
   ({ sourceFile, checker, inspector }: ExtractModuleIRInput) =>
-  (stmt: ts.VariableStatement): ReadonlyArray<BindingInfo> => {
-    const isExported = hasExportModifier(stmt);
-    return RA.chain((decl: ts.VariableDeclaration): ReadonlyArray<BindingInfo> => {
-      if (!ts.isIdentifier(decl.name)) {
-        return [];
-      }
-      const initOpt = O.fromNullable(decl.initializer);
-      const type = checker.getTypeAtLocation(decl);
-      const hasSatisfies = O.exists(ts.isSatisfiesExpression)(initOpt);
-      const hasExplicitReturn =
-        decl.type !== undefined || hasExplicitReturnAnnotation(inspector)(initOpt);
-      return [
-        {
-          name: decl.name.text,
-          isExported,
-          kind: classifyBindingKind({ sf: sourceFile, inspector, isExported, type, initOpt }),
-          hasSatisfies,
-          hasExplicitReturnType: hasExplicitReturn,
-          signature: inspector.formatType(type),
-          effects: inspector.detectEffects(type),
-          stepCount: countFlowSteps(inspector)(initOpt),
-          location: inspector.getLocation(sourceFile)(decl),
-          declaration: decl,
-          statement: stmt,
-          initializer: initOpt,
-        },
-      ];
-    })(stmt.declarationList.declarations);
-  };
+  (stmt: ts.VariableStatement): ReadonlyArray<BindingInfo> =>
+    RA.chain(
+      buildBindingFromDecl({
+        sourceFile,
+        checker,
+        inspector,
+        stmt,
+        isExported: hasExportModifier(stmt),
+      }),
+    )(stmt.declarationList.declarations);
 
-const extractBindings = (input: ExtractModuleIRInput): ReadonlyArray<BindingInfo> =>
+const extractBindings = (input: ExtractModuleIRInput) =>
   flow(
     RA.filter(ts.isVariableStatement),
     RA.chain(statementToBindings(input)),
-  )(input.sourceFile.statements);
+  )(sourceFileStatements.get(input.sourceFile));
+
+const isFlowStepArg =
+  (bindingNames: ReadonlyArray<string>) =>
+  (arg: ts.Expression): arg is ts.Identifier =>
+    ts.isIdentifier(arg) && RA.elem(S.Eq)(arg.text)(bindingNames);
+
+const toFlowStepEdge =
+  (bindingName: string) =>
+  (arg: ts.Identifier): TypeFlowEdge => ({
+    from: bindingName,
+    to: arg.text,
+    role: 'flow-step',
+  });
+
+const extractFlowStepEdge =
+  ({ bindingName, bindingNames }: EdgeContext) =>
+  (arg: ts.Expression) =>
+    O.map(toFlowStepEdge(bindingName))(O.fromPredicate(isFlowStepArg(bindingNames))(arg));
+
+const isUsedBindingId =
+  ({ bindingName, bindingNames }: EdgeContext) =>
+  (n: ts.Node): n is ts.Identifier =>
+    ts.isIdentifier(n) && n.text !== bindingName && RA.elem(S.Eq)(n.text)(bindingNames);
+
+const toUsesEdge =
+  (bindingName: string) =>
+  (id: ts.Identifier): TypeFlowEdge => ({
+    from: bindingName,
+    to: id.text,
+    role: 'uses',
+  });
+
+const extractUsesEdge =
+  (ctx: EdgeContext) =>
+  (n: ts.Node) =>
+    O.map(toUsesEdge(ctx.bindingName))(O.fromPredicate(isUsedBindingId(ctx))(n));
+
+const collectCallFlowEdges =
+  (ctx: EdgeContext) =>
+  (call: ts.CallExpression): ReadonlyArray<TypeFlowEdge> =>
+    RA.filterMap(extractFlowStepEdge(ctx))(call.arguments);
+
+const collectFlowArgEdges =
+  (ctx: EdgeContext) =>
+  (unwrapped: ts.Expression): ReadonlyArray<TypeFlowEdge> =>
+    match(unwrapped)
+      .when(ts.isCallExpression, collectCallFlowEdges(ctx))
+      .otherwise(constant(RA.empty));
+
+const extractEdgesFromInit =
+  ({
+    sf,
+    inspector,
+    bindingName,
+    bindingNames,
+  }: {
+    readonly sf: ts.SourceFile;
+    readonly inspector: TypeInspector;
+    readonly bindingName: string;
+    readonly bindingNames: ReadonlyArray<string>;
+  }) =>
+  (expr: ts.Expression): ReadonlyArray<TypeFlowEdge> => {
+    const unwrapped = inspector.unwrapSatisfiesAndParens(expr);
+    const isFlow = isFlowCallExpr(inspector)(unwrapped);
+    const ctx = { bindingName, bindingNames };
+    const flowArgIds = B.match(
+      constant(RA.empty),
+      () => collectFlowArgEdges(ctx)(unwrapped),
+    )(isFlow);
+    const allIds = RA.filterMap(extractUsesEdge(ctx))(collectNodes(sf)(unwrapped));
+    return RA.uniq(typeFlowEdgeEq)([...flowArgIds, ...allIds]);
+  };
 
 const extractEdgesForBinding =
   ({
@@ -277,32 +457,11 @@ const extractEdgesForBinding =
   }) =>
   (binding: BindingInfo): ReadonlyArray<TypeFlowEdge> =>
     O.match(
-      constant([] as ReadonlyArray<TypeFlowEdge>),
-      (expr: ts.Expression) => {
-        const unwrapped = inspector.unwrapSatisfiesAndParens(expr);
-        const isFlow = ts.isCallExpression(unwrapped) && inspector.isFlowCall(unwrapped);
-        const flowArgIds = isFlow
-          ? RA.filterMap((arg: ts.Expression) =>
-              ts.isIdentifier(arg) && RA.elem(S.Eq)(arg.text)(bindingNames)
-                ? O.some<TypeFlowEdge>({ from: binding.name, to: arg.text, role: 'flow-step' })
-                : O.none,
-            )(unwrapped.arguments)
-          : ([] as ReadonlyArray<TypeFlowEdge>);
-        const allIds = RA.filterMap((n: ts.Node) =>
-          ts.isIdentifier(n) &&
-          n.text !== binding.name &&
-          RA.elem(S.Eq)(n.text)(bindingNames)
-            ? O.some<TypeFlowEdge>({ from: binding.name, to: n.text, role: 'uses' })
-            : O.none,
-        )(collectNodes(sf)(unwrapped));
-        return RA.uniq({
-          equals: (a: TypeFlowEdge, b: TypeFlowEdge) =>
-            a.from === b.from && a.to === b.to && a.role === b.role,
-        })([...flowArgIds, ...allIds]);
-      },
+      constant(RA.empty),
+      extractEdgesFromInit({ sf, inspector, bindingName: binding.name, bindingNames }),
     )(binding.initializer);
 
-const toTypeFlowNode = (b: BindingInfo): TypeFlowNode => ({
+const toTypeFlowNode = (b: BindingInfo) => ({
   name: b.name,
   kind: b.kind,
   signature: b.signature,
@@ -310,12 +469,14 @@ const toTypeFlowNode = (b: BindingInfo): TypeFlowNode => ({
   stepCount: b.stepCount,
 });
 
-const buildModuleIR = (input: ExtractModuleIRInput): ModuleIR => {
+const readBindingName = (b: BindingInfo) => b.name;
+
+const buildModuleIR = (input: ExtractModuleIRInput) => {
   const { sourceFile, inspector } = input;
   const imports = extractImports(sourceFile);
   const typeDeclarations = extractTypeDeclarations(input);
   const bindings = extractBindings(input);
-  const bindingNames = RA.map((b: BindingInfo) => b.name)(bindings);
+  const bindingNames = RA.map(readBindingName)(bindings);
   const edges = RA.chain(extractEdgesForBinding({ sf: sourceFile, inspector, bindingNames }))(
     bindings,
   );

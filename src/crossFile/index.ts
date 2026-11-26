@@ -1,3 +1,10 @@
+import * as B from 'fp-ts/lib/boolean.js';
+import * as M from 'fp-ts/lib/Monoid.js';
+import * as Ord from 'fp-ts/lib/Ord.js';
+import { sort as raSort } from 'fp-ts/lib/ReadonlyArray.js';
+import * as S from 'fp-ts/lib/string.js';
+import { constant, flow } from 'fp-ts/lib/function.js';
+import * as N from 'fp-ts/lib/number.js';
 import type * as ts from 'typescript';
 import type {
   BuiltProjectDag,
@@ -8,30 +15,59 @@ import type { HintPriority, TypeInspector } from '../model/report.js';
 import { runDagSmellDetectors } from './dagSmells.js';
 import { runPatternDiscoveryDetectors } from './patternDiscovery.js';
 
-const priorityWeight = (p: HintPriority): number =>
-  p === 'high' ? 0 : p === 'medium' ? 1 : 2;
-
-export const runAllCrossFileHints = (
-  dag: BuiltProjectDag,
-  checker: ts.TypeChecker,
-  inspector: TypeInspector,
-  options: ResolvedAnalyzeOptions,
-): ReadonlyArray<CrossFileHint> => {
-  if (dag.modules.size < 2) {
-    return [];
-  }
-
-  const allHints: CrossFileHint[] = [
-    ...runDagSmellDetectors(dag, { minDirModules: options.minDirModules }),
-    ...runPatternDiscoveryDetectors(dag, checker, inspector, {
-      minPatternOccurrences: options.minPatternOccurrences,
-    }),
-  ];
-
-  return allHints.sort(
-    (a, b) =>
-      priorityWeight(a.priority) - priorityWeight(b.priority) ||
-      a.category.localeCompare(b.category) ||
-      a.hintId.localeCompare(b.hintId),
-  );
+export type RunAllCrossFileHintsInput = {
+  readonly dag: BuiltProjectDag;
+  readonly checker: ts.TypeChecker;
+  readonly inspector: TypeInspector;
+  readonly options: ResolvedAnalyzeOptions;
 };
+
+export type RunAllCrossFileHints = (
+  input: RunAllCrossFileHintsInput,
+) => ReadonlyArray<CrossFileHint>;
+
+const priorityWeight = (p: HintPriority) => {
+  const weights = { high: 0, medium: 1, low: 2 } as const;
+  return weights[p];
+};
+
+const getHintPriority = (h: CrossFileHint) => h.priority;
+const getHintCategory = (h: CrossFileHint) => h.category;
+const getHintId = (h: CrossFileHint) => h.hintId;
+
+const ordByPriority = Ord.contramap(flow(getHintPriority, priorityWeight))(N.Ord);
+const ordByCategory = Ord.contramap(getHintCategory)(S.Ord);
+const ordByHintId = Ord.contramap(getHintId)(S.Ord);
+
+const crossFileHintOrd = M.concatAll(Ord.getMonoid<CrossFileHint>())([
+  ordByPriority,
+  ordByCategory,
+  ordByHintId,
+]);
+
+const sortHints = raSort(crossFileHintOrd);
+
+const collectAllHints = ({
+  dag,
+  checker,
+  inspector,
+  options,
+}: RunAllCrossFileHintsInput) =>
+  sortHints([
+    ...runDagSmellDetectors({
+      dag,
+      options: { minDirModules: options.minDirModules },
+    }),
+    ...runPatternDiscoveryDetectors({
+      dag,
+      checker,
+      inspector,
+      options: { minPatternOccurrences: options.minPatternOccurrences },
+    }),
+  ]);
+
+export const runAllCrossFileHints = ((input: RunAllCrossFileHintsInput) =>
+  B.match(
+    () => collectAllHints(input),
+    constant<ReadonlyArray<CrossFileHint>>([]),
+  )(input.dag.modules.size < 2)) satisfies RunAllCrossFileHints;

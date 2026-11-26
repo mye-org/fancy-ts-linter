@@ -1,3 +1,5 @@
+import * as B from 'fp-ts/lib/boolean.js';
+import { flow } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as ts from 'typescript';
@@ -5,85 +7,133 @@ import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
-const isReaderCandidate = (ctx: RuleContext) => (b: BindingInfo): O.Option<string> => {
-  const t = ctx.checker.getTypeAtLocation(b.declaration);
-  const sigs = t.getCallSignatures();
-  if (sigs.length === 0) {
-    return O.none;
-  }
-  const firstSig = sigs[0];
-  if (firstSig === undefined) {
-    return O.none;
-  }
-  const retSigs = firstSig.getReturnType().getCallSignatures();
-  if (retSigs.length === 0 || firstSig.getParameters().length !== 1) {
-    return O.none;
-  }
-  const param = firstSig.getParameters()[0];
-  if (param === undefined) {
-    return O.none;
-  }
-  const paramType = ctx.checker.getTypeOfSymbolAtLocation(param, b.declaration);
-  const typeText = ctx.inspector.formatType(paramType);
-  return paramType.getProperties().length >= 2 && /config|env|deps|ctx|repo|client/i.test(typeText)
-    ? O.some(typeText)
-    : O.none;
+type ReaderCandidate = {
+  readonly b: BindingInfo;
+  readonly depType: string;
 };
 
-const checkReaderThreading = (ctx: RuleContext): ReadonlyArray<AgentHint> => {
-  const candidates = RA.filterMap((b: BindingInfo) =>
-    O.map((depType: string) => ({ b, depType }))(isReaderCandidate(ctx)(b)),
-  )(ctx.ir.bindings);
+type TargetBinding = {
+  readonly context: RuleContext;
+  readonly binding: BindingInfo;
+};
 
-  return candidates.length >= 2
-    ? [
+const getIrBindings = (ctx: RuleContext) => ctx.ir.bindings;
+
+const getBindingType = (ctx: RuleContext) => (b: BindingInfo) =>
+  ctx.checker.getTypeAtLocation(b.declaration);
+
+const renderType = (ctx: RuleContext) => (t: ts.Type) => ctx.inspector.formatType(t);
+
+const getBindingLocation = (b: BindingInfo) => ({
+  line: b.location.line,
+  column: b.location.column,
+});
+
+const readCallSignatures = (t: ts.Type) => t.getCallSignatures();
+
+const getFirstParam = (sig: ts.Signature) => RA.head(sig.getParameters());
+
+const isEnvDepType = (typeText: string) => /config|env|deps|ctx|repo|client/i.test(typeText);
+
+const hasSingleCurriedParam = (sig: ts.Signature) =>
+  sig.getReturnType().getCallSignatures().length > 0 && sig.getParameters().length === 1;
+
+const checkParamSymbol = (target: TargetBinding) => (param: ts.Symbol) => {
+  const paramType = target.context.checker.getTypeOfSymbolAtLocation(
+    param,
+    target.binding.declaration,
+  );
+  const typeText = renderType(target.context)(paramType);
+  return B.match<O.Option<string>>(
+    () => O.none,
+    () => O.some(typeText),
+  )(paramType.getProperties().length >= 2 && isEnvDepType(typeText));
+};
+
+const checkSigForReader = (target: TargetBinding) =>
+  flow(
+    O.fromPredicate(hasSingleCurriedParam),
+    O.chain(getFirstParam),
+    O.chain(checkParamSymbol(target)),
+  );
+
+const mkReaderCandidate = (b: BindingInfo) => (depType: string) => ({ b, depType });
+
+const toReaderCandidate = (ctx: RuleContext) => (b: BindingInfo) =>
+  flow(
+    getBindingType(ctx),
+    readCallSignatures,
+    RA.head,
+    O.chain(checkSigForReader({ context: ctx, binding: b })),
+    O.map(mkReaderCandidate(b)),
+  )(b);
+
+const getCandidateName = (c: ReaderCandidate) => c.b.name;
+
+const buildReaderThreadingHint =
+  (candidates: ReadonlyArray<ReaderCandidate>) =>
+  (first: ReaderCandidate): ReadonlyArray<AgentHint> =>
+    B.match<ReadonlyArray<AgentHint>>(
+      () => [],
+      () => [
         {
           hintId: 'monad-reader-threading',
           category: 'monad',
           priority: 'medium',
-          location: {
-            line: candidates[0]!.b.location.line,
-            column: candidates[0]!.b.location.column,
-          },
-          evidence: `Dependency/config type (${candidates[0]!.depType}) is threaded across ${candidates.length} curried helpers (${RA.map((c: { readonly b: BindingInfo }) => c.b.name)(candidates).join(', ')}).`,
+          location: getBindingLocation(first.b),
+          evidence: `Dependency/config type (${first.depType}) is threaded across ${candidates.length} curried helpers (${RA.map(getCandidateName)(candidates).join(', ')}).`,
           suggestion:
             'Lift shared dependency threading into `fp-ts/Reader` or `ReaderTaskEither` (`RTE.ask` / `RTE.asks`).',
-          suggestedSignature: O.some(`ReaderTaskEither<${candidates[0]!.depType}, Error, Result>`),
+          suggestedSignature: O.some(`ReaderTaskEither<${first.depType}, Error, Result>`),
           researchQuestions: [
             'Do these helpers share the same environment/dependency record across the module?',
           ],
         },
-      ]
-    : [];
+      ],
+    )(candidates.length >= 2);
+
+const checkReaderThreading = (ctx: RuleContext) => {
+  const candidates = RA.filterMap(toReaderCandidate(ctx))(getIrBindings(ctx));
+  return O.match<ReaderCandidate, ReadonlyArray<AgentHint>>(
+    () => [],
+    buildReaderThreadingHint(candidates),
+  )(RA.head(candidates));
 };
 
-const checkArrayOfEffects = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain((b: BindingInfo): ReadonlyArray<AgentHint> => {
-    const t = ctx.checker.getTypeAtLocation(b.declaration);
-    const sigs = t.getCallSignatures();
-    const returnsArrayOfEffect = RA.some((sig: ts.Signature) => {
-      const retStr = ctx.inspector.formatType(sig.getReturnType());
-      return /(ReadonlyArray|Array)<.*(Option|Either|TaskEither|Task)</.test(retStr);
-    })(sigs);
+const isArrayOfEffectSig = (ctx: RuleContext) => (sig: ts.Signature) =>
+  /(ReadonlyArray|Array)<.*(Option|Either|TaskEither|Task)</.test(
+    renderType(ctx)(sig.getReturnType()),
+  );
 
-    return returnsArrayOfEffect
-      ? [
-          {
-            hintId: `monad-traverse-${b.name}`,
-            category: 'monad',
-            priority: 'medium',
-            location: { line: b.location.line, column: b.location.column },
-            evidence: `\`${b.name}\` produces an array of effects (${b.signature}).`,
-            suggestion:
-              'Use `RA.traverse(Effect.Applicative)` or `RA.sequence` to invert `ReadonlyArray<Effect<A>>` into `Effect<ReadonlyArray<A>>`.',
-            suggestedSignature: O.none,
-            researchQuestions: [
-              'Should this collection transform fail-fast (`E.Applicative`) or accumulate errors (`E.getApplicativeValidation`)?',
-            ],
-          },
-        ]
-      : [];
-  })(ctx.ir.bindings);
+const checkBindingArrayOfEffects = (ctx: RuleContext) => (b: BindingInfo) => {
+  const returnsArrayOfEffect = flow(
+    getBindingType(ctx),
+    readCallSignatures,
+    RA.some(isArrayOfEffectSig(ctx)),
+  )(b);
+
+  return B.match<ReadonlyArray<AgentHint>>(
+    () => [],
+    () => [
+      {
+        hintId: `monad-traverse-${b.name}`,
+        category: 'monad',
+        priority: 'medium',
+        location: getBindingLocation(b),
+        evidence: `\`${b.name}\` produces an array of effects (${b.signature}).`,
+        suggestion:
+          'Use `RA.traverse(Effect.Applicative)` or `RA.sequence` to invert `ReadonlyArray<Effect<A>>` into `Effect<ReadonlyArray<A>>`.',
+        suggestedSignature: O.none,
+        researchQuestions: [
+          'Should this collection transform fail-fast (`E.Applicative`) or accumulate errors (`E.getApplicativeValidation`)?',
+        ],
+      },
+    ],
+  )(returnsArrayOfEffect);
+};
+
+const checkArrayOfEffects = (ctx: RuleContext) =>
+  RA.chain(checkBindingArrayOfEffects(ctx))(getIrBindings(ctx));
 
 export const detectMonadLiftingHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> => [
   ...checkReaderThreading(ctx),

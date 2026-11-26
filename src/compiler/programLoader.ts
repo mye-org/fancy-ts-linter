@@ -22,22 +22,20 @@ export type LoadedProgram = {
 
 export type LoadTargetProgram = (input: LoadProgramInput) => E.Either<string, LoadedProgram>;
 
-type RawTsConfigResult = {
-  readonly config?: unknown;
-  readonly error?: ts.Diagnostic;
+type BuildProgramContext = {
+  readonly filePaths: ReadonlyArray<string>;
+  readonly projectBaseDir: string;
 };
 
-const resolveAbsolutePath = (p: string) => path.resolve(p);
+type LineCharInput = {
+  readonly sf: ts.SourceFile;
+  readonly startPos: number;
+  readonly endPos: number;
+};
 
-const defaultCompilerOptions: ts.CompilerOptions = {
-  target: ts.ScriptTarget.ES2023,
-  module: ts.ModuleKind.NodeNext,
-  moduleResolution: ts.ModuleResolutionKind.NodeNext,
-  strict: true,
-  noUncheckedIndexedAccess: true,
-  exactOptionalPropertyTypes: true,
-  skipLibCheck: true,
-  esModuleInterop: true,
+type DiagContext = {
+  readonly sf: ts.SourceFile;
+  readonly diag: ts.Diagnostic;
 };
 
 const findConfigFromFile = (filePath: string): O.Option<string> =>
@@ -50,40 +48,56 @@ const findConfigFromFirstFile = (filePaths: ReadonlyArray<string>): O.Option<str
 
 const resolveConfigPath = (input: LoadProgramInput): O.Option<string> =>
   O.alt(constant(findConfigFromFirstFile(input.filePaths)))(
-    O.map(resolveAbsolutePath)(input.tsconfigPath),
+    O.map(path.resolve)(input.tsconfigPath),
   );
 
-const readRawTsConfig = (configPath: string): RawTsConfigResult =>
+const formatTsDiagnostic = (diag: ts.Diagnostic) =>
+  ts.flattenDiagnosticMessageText(diag.messageText, '\n');
+
+const formatReadConfigError = (configPath: string) => (diag: ts.Diagnostic) =>
+  E.left(`Failed to read tsconfig at ${configPath}: ${formatTsDiagnostic(diag)}`);
+
+const parseRawTsConfig =
+  (configPath: string) =>
+  (res: ReturnType<typeof ts.readConfigFile>) =>
+    O.match(
+      () =>
+        E.right<string, ts.ParsedCommandLine>(
+          ts.parseJsonConfigFileContent(res.config, ts.sys, path.dirname(configPath)),
+        ),
+      formatReadConfigError(configPath),
+    )(O.fromNullable(res.error));
+
+const readRawTsConfig = (configPath: string) =>
   ts.readConfigFile(configPath, ts.sys.readFile);
-
-const hasNoConfigError = (res: RawTsConfigResult) => res.error === undefined;
-
-const formatReadConfigError = (configPath: string) => (res: RawTsConfigResult) =>
-  `Failed to read tsconfig at ${configPath}: ${O.match(
-    constant('Unknown error'),
-    (d: ts.Diagnostic) => ts.flattenDiagnosticMessageText(d.messageText, '\n'),
-  )(O.fromNullable(res.error))}`;
-
-const parseConfigJson = (configPath: string) => (res: RawTsConfigResult): ts.ParsedCommandLine =>
-  ts.parseJsonConfigFileContent(res.config, ts.sys, path.dirname(configPath));
 
 const readTsConfig = (configPath: string): E.Either<string, ts.ParsedCommandLine> =>
   flow(
     readRawTsConfig,
-    E.fromPredicate(hasNoConfigError, formatReadConfigError(configPath)),
-    E.map(parseConfigJson(configPath)),
+    parseRawTsConfig(configPath),
   )(configPath);
 
-const makeEmptyParsedConfig = (filePaths: ReadonlyArray<string>): E.Either<string, ts.ParsedCommandLine> =>
+const makeEmptyParsedConfig = (
+  filePaths: ReadonlyArray<string>,
+): E.Either<string, ts.ParsedCommandLine> =>
   E.right({
-    options: defaultCompilerOptions,
+    options: {
+      target: ts.ScriptTarget.ES2023,
+      module: ts.ModuleKind.NodeNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      strict: true,
+      noUncheckedIndexedAccess: true,
+      exactOptionalPropertyTypes: true,
+      skipLibCheck: true,
+      esModuleInterop: true,
+    },
     fileNames: [...filePaths],
     errors: [],
   });
 
 const resolveParsedConfig = (input: LoadProgramInput) =>
   O.match(
-    constant(makeEmptyParsedConfig(input.filePaths)),
+    () => makeEmptyParsedConfig(input.filePaths),
     readTsConfig,
   )(resolveConfigPath(input));
 
@@ -106,12 +120,17 @@ const createProgramFromOptions =
       options,
     });
 
+const mergeWithParsedFiles =
+  (parsedFiles: ReadonlyArray<string>) =>
+  (absTargets: ReadonlyArray<string>) =>
+    dedupePaths([...parsedFiles, ...absTargets]);
+
 const buildProgramWith =
-  (filePaths: ReadonlyArray<string>, projectBaseDir: string) =>
+  ({ filePaths, projectBaseDir }: BuildProgramContext) =>
   (parsed: ts.ParsedCommandLine): LoadedProgram =>
     flow(
-      RA.map(resolveAbsolutePath),
-      (absTargets) => dedupePaths([...parsed.fileNames, ...absTargets]),
+      RA.map(path.resolve),
+      mergeWithParsedFiles(parsed.fileNames),
       createProgramFromOptions(parsed.options),
       toLoadedProgram(projectBaseDir),
     )(filePaths);
@@ -119,28 +138,24 @@ const buildProgramWith =
 const getDiagLength = (diag: ts.Diagnostic) =>
   O.getOrElse(constant(0))(O.fromNullable(diag.length));
 
-const lineCharFromPositions = ({
-  sf,
-  startPos,
-  endPos,
-}: {
-  readonly sf: ts.SourceFile;
-  readonly startPos: number;
-  readonly endPos: number;
-}): SourceLocation => ({
+const lineCharFromPositions = ({ sf, startPos, endPos }: LineCharInput) => ({
   line: sf.getLineAndCharacterOfPosition(startPos).line + 1,
   column: sf.getLineAndCharacterOfPosition(startPos).character + 1,
   endLine: sf.getLineAndCharacterOfPosition(endPos).line + 1,
   endColumn: sf.getLineAndCharacterOfPosition(endPos).character + 1,
 });
 
+const diagLocationFromStart =
+  ({ sf, diag }: DiagContext) =>
+  (start: number) =>
+    lineCharFromPositions({ sf, startPos: start, endPos: start + getDiagLength(diag) });
+
 const toDiagnosticLocation =
   (sf: ts.SourceFile) =>
   (diag: ts.Diagnostic): SourceLocation =>
     O.match(
       constant({ line: 1, column: 1, endLine: 1, endColumn: 1 }),
-      (start: number) =>
-        lineCharFromPositions({ sf, startPos: start, endPos: start + getDiagLength(diag) }),
+      diagLocationFromStart({ sf, diag }),
     )(O.fromNullable(diag.start));
 
 const sliceSnippet =
@@ -184,14 +199,17 @@ const ensureNonEmptyTargets = (input: LoadProgramInput): E.Either<string, LoadPr
     constant(E.left('No target TypeScript files provided.')),
   )(RA.isEmpty(input.filePaths));
 
-const resolveProjectBaseDir = (input: LoadProgramInput): string =>
+const fallbackBaseDir = (filePaths: ReadonlyArray<string>) =>
+  path.dirname(path.resolve(O.getOrElse(process.cwd)(RA.head(filePaths))));
+
+const resolveProjectBaseDir = (input: LoadProgramInput) =>
   O.match(
-    () => path.dirname(path.resolve(input.filePaths[0] ?? process.cwd())),
-    (cfgPath: string) => path.dirname(cfgPath),
+    () => fallbackBaseDir(input.filePaths),
+    path.dirname,
   )(resolveConfigPath(input));
 
 const loadFromValidInput = (input: LoadProgramInput): E.Either<string, LoadedProgram> =>
-  E.map(buildProgramWith(input.filePaths, resolveProjectBaseDir(input)))(
+  E.map(buildProgramWith({ filePaths: input.filePaths, projectBaseDir: resolveProjectBaseDir(input) }))(
     resolveParsedConfig(input),
   );
 

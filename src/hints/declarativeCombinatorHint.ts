@@ -1,63 +1,109 @@
+import * as B from 'fp-ts/lib/boolean.js';
+import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
+import { Lens } from 'monocle-ts';
 import * as ts from 'typescript';
 import type { AgentHint, BindingInfo, RuleContext } from '../model/report.js';
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
-const collectAllNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts.Node> => [
-  node,
-  ...RA.chain(collectAllNodes(sf))(node.getChildren(sf)),
-];
+type ExprContext = {
+  readonly ctx: RuleContext;
+  readonly b: BindingInfo;
+};
 
-const checkBindingDeclarative = (ctx: RuleContext) => (b: BindingInfo): ReadonlyArray<AgentHint> =>
-  O.match(
-    () => [] as ReadonlyArray<AgentHint>,
-    (expr: ts.Expression): ReadonlyArray<AgentHint> => {
-      const text = expr.getText(ctx.sourceFile);
-      const nodes = collectAllNodes(ctx.sourceFile)(expr);
+type QueueContext = {
+  readonly sf: ts.SourceFile;
+  readonly queue: ReadonlyArray<ts.Node>;
+};
 
-      const isSelfRecursive =
-        b.kind === 'leaf-fn' &&
-        RA.some((n: ts.Node) => ts.isIdentifier(n) && n.text === b.name)(nodes);
+type HeadContext = {
+  readonly sf: ts.SourceFile;
+  readonly head: ts.Node;
+};
 
-      const usesManualReduce = /\b(RA|A)\.reduce\b/.test(text);
+const bindingLineLens = Lens.fromPath<BindingInfo>()(['location', 'line']);
+const bindingColLens = Lens.fromPath<BindingInfo>()(['location', 'column']);
 
-      const recursiveHint: ReadonlyArray<AgentHint> = isSelfRecursive
-        ? [
-            {
-              hintId: `declarative-recursion-${b.name}`,
-              category: 'declarative-combinator',
-              priority: 'medium',
-              location: { line: b.location.line, column: b.location.column },
-              evidence: `\`${b.name}\` uses explicit self-recursion.`,
-              suggestion:
-                'Prefer declarative `fp-ts/ReadonlyArray` combinators (`RA.unfold`, `RA.traverse`, `RA.reduce`, `Monoid.concatAll`) over manual recursion.',
-              suggestedSignature: O.none,
-              researchQuestions: [`Can \`${b.name}\` be expressed as a fold, unfold, or traverse?`],
-            },
-          ]
-        : [];
+const withChildren =
+  ({ sf, head }: HeadContext) =>
+  (tail: ReadonlyArray<ts.Node>) =>
+    [head, [...head.getChildren(sf), ...tail]] as const;
 
-      const reduceHint: ReadonlyArray<AgentHint> = usesManualReduce
-        ? [
-            {
-              hintId: `declarative-reduce-${b.name}`,
-              category: 'declarative-combinator',
-              priority: 'low',
-              location: { line: b.location.line, column: b.location.column },
-              evidence: `\`${b.name}\` uses \`reduce\`.`,
-              suggestion:
-                'Verify whether `RA.filterMap`, `RA.partitionMap`, `RA.traverse`, or `Monoid.concatAll` expresses the intent more declaratively than `reduce`.',
-              suggestedSignature: O.none,
-              researchQuestions: [`Is \`${b.name}\` building a filtered/partitioned collection or combining a Monoid?`],
-            },
-          ]
-        : [];
+const expandHead =
+  ({ sf, queue }: QueueContext) =>
+  (head: ts.Node) =>
+    O.map(withChildren({ sf, head }))(RA.tail(queue));
 
-      return [...recursiveHint, ...reduceHint];
+const unfoldNodeQueue =
+  (sf: ts.SourceFile) =>
+  (queue: ReadonlyArray<ts.Node>) =>
+    O.chain(expandHead({ sf, queue }))(RA.head(queue));
+
+const collectAllNodes = (sf: ts.SourceFile) => (root: ts.Node) =>
+  RA.unfold([root], unfoldNodeQueue(sf));
+
+const isIdentifierNamed = (name: string) => (n: ts.Node) =>
+  ts.isIdentifier(n) && n.text === name;
+
+const makeRecursiveHint = (b: BindingInfo) => {
+  const hints: ReadonlyArray<AgentHint> = [
+    {
+      hintId: `declarative-recursion-${b.name}`,
+      category: 'declarative-combinator',
+      priority: 'medium',
+      location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
+      evidence: `\`${b.name}\` uses explicit self-recursion.`,
+      suggestion:
+        'Prefer declarative `fp-ts/ReadonlyArray` combinators (`RA.unfold`, `RA.traverse`, `RA.foldMap`, `Monoid.concatAll`) over manual recursion.',
+      suggestedSignature: O.none,
+      researchQuestions: [`Can \`${b.name}\` be expressed as a fold, unfold, or traverse?`],
     },
-  )(b.initializer);
+  ];
+  return hints;
+};
+
+const makeReduceHint = (b: BindingInfo) => {
+  const hints: ReadonlyArray<AgentHint> = [
+    {
+      hintId: `declarative-reduce-${b.name}`,
+      category: 'declarative-combinator',
+      priority: 'low',
+      location: { line: bindingLineLens.get(b), column: bindingColLens.get(b) },
+      evidence: `\`${b.name}\` uses \`reduce\`.`,
+      suggestion:
+        'Verify whether `RA.filterMap`, `RA.partitionMap`, `RA.traverse`, or `Monoid.concatAll` expresses the intent more declaratively than `reduce`.',
+      suggestedSignature: O.none,
+      researchQuestions: [
+        `Is \`${b.name}\` building a filtered/partitioned collection or combining a Monoid?`,
+      ],
+    },
+  ];
+  return hints;
+};
+
+const checkExprDeclarative =
+  ({ ctx, b }: ExprContext) =>
+  (expr: ts.Expression): ReadonlyArray<AgentHint> => {
+    const text = expr.getText(ctx.sourceFile);
+    const nodes = collectAllNodes(ctx.sourceFile)(expr);
+    const isSelfRecursive =
+      b.kind === 'leaf-fn' && RA.some(isIdentifierNamed(b.name))(nodes);
+    const usesManualReduce = /\b(RA|A)\.reduce\b/.test(text);
+    const recursiveHint = B.match(
+      RA.zero<AgentHint>,
+      constant(makeRecursiveHint(b)),
+    )(isSelfRecursive);
+    const reduceHint = B.match(
+      RA.zero<AgentHint>,
+      constant(makeReduceHint(b)),
+    )(usesManualReduce);
+    return [...recursiveHint, ...reduceHint];
+  };
+
+const checkBindingDeclarative = (ctx: RuleContext) => (b: BindingInfo) =>
+  O.match(RA.zero<AgentHint>, checkExprDeclarative({ ctx, b }))(b.initializer);
 
 export const detectDeclarativeCombinatorHints = ((ctx: RuleContext): ReadonlyArray<AgentHint> =>
   RA.chain(checkBindingDeclarative(ctx))(ctx.ir.bindings)) satisfies HintRunner;

@@ -8,6 +8,10 @@ const defaultOpts: AnalyzeOptions = {
   tsconfigPath: O.some(path.resolve('tsconfig.json')),
   maxFlowSteps: 10,
   format: 'json',
+  includeGraph: O.none,
+  minPatternOccurrences: O.none,
+  minDirModules: O.none,
+  excludePatterns: O.none,
 };
 
 const analyzeOne = (relPath: string) => {

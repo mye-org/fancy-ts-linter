@@ -105,10 +105,10 @@ export type AnalyzeOptions = {
   readonly tsconfigPath: O.Option<string>;
   readonly maxFlowSteps: number;
   readonly format: OutputFormat;
-  readonly includeGraph?: boolean;
-  readonly minPatternOccurrences?: number;
-  readonly minDirModules?: number;
-  readonly excludePatterns?: ReadonlyArray<string>;
+  readonly includeGraph: O.Option<boolean>;
+  readonly minPatternOccurrences: O.Option<number>;
+  readonly minDirModules: O.Option<number>;
+  readonly excludePatterns: O.Option<ReadonlyArray<string>>;
 };
 
 export type ImportInfo = {
@@ -209,7 +209,7 @@ const findExportedBinding = (ir: ModuleIR): O.Option<BindingInfo> =>
 const getBindingName = (b: BindingInfo) => b.name;
 const getBindingSignature = (b: BindingInfo) => b.signature;
 
-const toSummary = (input: ReportInput): AnalysisSummary => ({
+const toSummary = (input: ReportInput) => ({
   errorCount: input.errors.length,
   hintCount: input.hints.length,
   exportedFunction: O.map(getBindingName)(findExportedBinding(input.ir)),
@@ -227,9 +227,9 @@ const assembleReport = ({
 }: {
   readonly input: ReportInput;
   readonly summary: AnalysisSummary;
-}): AnalysisReport => ({
+}) => ({
   filePath: input.filePath,
-  passed: input.errors.length === 0,
+  passed: summary.errorCount === 0,
   summary,
   errors: input.errors,
   hints: input.hints,

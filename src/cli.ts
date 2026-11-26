@@ -1,6 +1,11 @@
+import * as Apply from 'fp-ts/lib/Apply.js';
+import * as B from 'fp-ts/lib/boolean.js';
 import * as E from 'fp-ts/lib/Either.js';
+import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import { parseArgs } from 'node:util';
+import { match, P } from 'ts-pattern';
 import {
   analyzeFiles,
   type AnalyzeOptions,
@@ -18,170 +23,232 @@ export type CliResult = {
 
 export type RunCli = (argv: ReadonlyArray<string>) => CliResult;
 
-type ParsedCli = {
-  readonly help: boolean;
+type ParsedCli =
+  | { readonly _tag: 'Help' }
+  | {
+      readonly _tag: 'Run';
+      readonly filePaths: ReadonlyArray<string>;
+      readonly options: AnalyzeOptions;
+    };
+
+type ParsePositiveIntInput = {
+  readonly flag: string;
+  readonly raw: O.Option<string>;
+  readonly defaultVal: number;
+  readonly minVal: number;
+};
+
+type FormatOutputInput = {
+  readonly format: OutputFormat;
+  readonly report: ProjectAnalysisReport;
+};
+
+type RawParsedArgs = {
+  readonly values: Readonly<Record<string, unknown>>;
+  readonly positionals: ReadonlyArray<string>;
+};
+
+type ValidatedCliNumbers = {
+  readonly format: OutputFormat;
+  readonly maxFlowSteps: number;
+  readonly minPatternOccurrences: number;
+  readonly minDirModules: number;
+};
+
+type RunCliBase = {
   readonly filePaths: ReadonlyArray<string>;
-  readonly options: AnalyzeOptions;
+  readonly tsconfigPath: O.Option<string>;
+  readonly includeGraph: boolean;
+  readonly excludePatterns: ReadonlyArray<string>;
 };
 
-const helpText = [
-  'Usage: fancy-ts-linter <file-or-dir...> [options]',
-  '',
-  'Options:',
-  '  --tsconfig <path>                Path to tsconfig.json (auto-discovered if omitted)',
-  '  --format <json|md>               Output format: json (default) or md',
-  '  --max-flow-steps <n>             Step threshold for DDD decomposition hint (default: 10)',
-  '  --include-graph                  Include full project DAG nodes/edges in output (default: false)',
-  '  --min-pattern-occurrences <n>    Minimum files for cross-file pattern discovery (default: 3)',
-  '  --min-dir-modules <n>            Minimum modules in a dir for junk-drawer analysis (default: 3)',
-  '  --exclude <pattern>              Glob or substring path pattern to exclude (repeatable)',
-  '  --help                           Show this help message',
-].join('\n');
+const getHelpText = constant(
+  [
+    'Usage: fancy-ts-linter <file-or-dir...> [options]',
+    '',
+    'Options:',
+    '  --tsconfig <path>                Path to tsconfig.json (auto-discovered if omitted)',
+    '  --format <json|md>               Output format: json (default) or md',
+    '  --max-flow-steps <n>             Step threshold for DDD decomposition hint (default: 10)',
+    '  --include-graph                  Include full project DAG nodes/edges in output (default: false)',
+    '  --min-pattern-occurrences <n>    Minimum files for cross-file pattern discovery (default: 3)',
+    '  --min-dir-modules <n>            Minimum modules in a dir for junk-drawer analysis (default: 3)',
+    '  --exclude <pattern>              Glob or substring path pattern to exclude (repeatable)',
+    '  --help                           Show this help message',
+  ].join('\n'),
+);
 
-const parseFormat = (raw: string | undefined): E.Either<string, OutputFormat> => {
-  if (raw === undefined) {
-    return E.right('json');
-  }
-  return raw === 'json' || raw === 'md'
-    ? E.right(raw)
-    : E.left(`Invalid --format "${raw}". Expected "json" or "md".`);
-};
+const toNone = constant(O.none);
+const emptyStrings = constant(RA.zero<string>());
+const identityStrings = (arr: ReadonlyArray<string>) => arr;
+const getErrorMessage = (e: Error) => e.message;
 
-const parsePositiveInt = (
-  flag: string,
-  raw: string | undefined,
-  defaultVal: number,
-  minVal: number,
-): E.Either<string, number> => {
-  if (raw === undefined) {
-    return E.right(defaultVal);
-  }
-  const n = Number(raw);
-  return Number.isInteger(n) && n >= minVal
-    ? E.right(n)
-    : E.left(`Invalid ${flag} "${raw}". Expected integer >= ${minVal}.`);
-};
+const toErrorMessage = (err: unknown) =>
+  match(err).with(P.instanceOf(Error), getErrorMessage).otherwise(String);
 
-const parseCliArgs = (argv: ReadonlyArray<string>): E.Either<string, ParsedCli> => {
-  let parsed: ReturnType<typeof parseArgs>;
-  try {
-    parsed = parseArgs({
-      args: argv.slice(2),
-      allowPositionals: true,
-      options: {
-        tsconfig: { type: 'string' },
-        format: { type: 'string' },
-        'max-flow-steps': { type: 'string' },
-        'include-graph': { type: 'boolean' },
-        'min-pattern-occurrences': { type: 'string' },
-        'min-dir-modules': { type: 'string' },
-        exclude: { type: 'string', multiple: true },
-        help: { type: 'boolean', short: 'h' },
-      },
-    });
-  } catch (err) {
-    return E.left(err instanceof Error ? err.message : String(err));
-  }
+const asOptionalString = (val: unknown): O.Option<string> =>
+  match(val).with(P.string, O.some).otherwise(toNone);
 
-  if (parsed.values.help === true) {
-    return E.right({
-      help: true,
-      filePaths: [],
-      options: { tsconfigPath: O.none, maxFlowSteps: 10, format: 'json' },
-    });
-  }
+const asStringArray = (val: unknown) =>
+  match(val).with(P.array(P.string), identityStrings).otherwise(emptyStrings);
 
-  if (parsed.positionals.length === 0) {
-    return E.left('No input files provided. Run with --help for usage.');
-  }
+const parseFormatValue = (raw: string): E.Either<string, OutputFormat> =>
+  match(raw)
+    .with('json', () => E.right<string, OutputFormat>('json'))
+    .with('md', () => E.right<string, OutputFormat>('md'))
+    .otherwise(() => E.left(`Invalid --format "${raw}". Expected "json" or "md".`));
 
-  const formatEither = parseFormat(
-    typeof parsed.values.format === 'string' ? parsed.values.format : undefined,
-  );
-  if (E.isLeft(formatEither)) {
-    return formatEither;
-  }
+const parseFormat = O.match(constant(E.right<string, OutputFormat>('json')), parseFormatValue);
 
-  const maxStepsEither = parsePositiveInt(
-    '--max-flow-steps',
-    typeof parsed.values['max-flow-steps'] === 'string'
-      ? parsed.values['max-flow-steps']
-      : undefined,
-    10,
-    2,
-  );
-  if (E.isLeft(maxStepsEither)) {
-    return maxStepsEither;
-  }
+const parsePositiveIntValue =
+  ({ flag, minVal }: { readonly flag: string; readonly minVal: number }) =>
+  (raw: string): E.Either<string, number> => {
+    const n = Number(raw);
+    return B.match(
+      () => E.left(`Invalid ${flag} "${raw}". Expected integer >= ${minVal}.`),
+      () => E.right(n),
+    )(Number.isInteger(n) && n >= minVal);
+  };
 
-  const minPatternEither = parsePositiveInt(
-    '--min-pattern-occurrences',
-    typeof parsed.values['min-pattern-occurrences'] === 'string'
-      ? parsed.values['min-pattern-occurrences']
-      : undefined,
-    3,
-    2,
-  );
-  if (E.isLeft(minPatternEither)) {
-    return minPatternEither;
-  }
+const parsePositiveInt = ({
+  flag,
+  raw,
+  defaultVal,
+  minVal,
+}: ParsePositiveIntInput): E.Either<string, number> =>
+  O.match(
+    () => E.right<string, number>(defaultVal),
+    parsePositiveIntValue({ flag, minVal }),
+  )(raw);
 
-  const minDirEither = parsePositiveInt(
-    '--min-dir-modules',
-    typeof parsed.values['min-dir-modules'] === 'string'
-      ? parsed.values['min-dir-modules']
-      : undefined,
-    3,
-    2,
-  );
-  if (E.isLeft(minDirEither)) {
-    return minDirEither;
-  }
-
-  const rawExcludes = parsed.values.exclude;
-  const excludePatterns: ReadonlyArray<string> = Array.isArray(rawExcludes)
-    ? rawExcludes.filter((v): v is string => typeof v === 'string')
-    : [];
-
-  const tsconfigVal =
-    typeof parsed.values.tsconfig === 'string' ? O.some(parsed.values.tsconfig) : O.none;
-
-  return E.right({
-    help: false,
-    filePaths: parsed.positionals,
+const parseNodeArgs = (argv: ReadonlyArray<string>) =>
+  parseArgs({
+    args: argv.slice(2),
+    allowPositionals: true,
     options: {
-      tsconfigPath: tsconfigVal,
-      maxFlowSteps: maxStepsEither.right,
-      format: formatEither.right,
-      includeGraph: parsed.values['include-graph'] === true,
-      minPatternOccurrences: minPatternEither.right,
-      minDirModules: minDirEither.right,
-      excludePatterns,
+      tsconfig: { type: 'string' },
+      format: { type: 'string' },
+      'max-flow-steps': { type: 'string' },
+      'include-graph': { type: 'boolean' },
+      'min-pattern-occurrences': { type: 'string' },
+      'min-dir-modules': { type: 'string' },
+      exclude: { type: 'string', multiple: true },
+      help: { type: 'boolean', short: 'h' },
     },
   });
-};
 
-const formatOutput = (format: OutputFormat, report: ProjectAnalysisReport): string =>
-  format === 'md' ? formatMarkdownReports(report) : formatJsonReports(report);
+const parseRawArgs = E.tryCatchK(parseNodeArgs, toErrorMessage);
 
-export const runCli: RunCli = (argv) => {
-  const parsedEither = parseCliArgs(argv);
-  if (E.isLeft(parsedEither)) {
-    return { exitCode: 2, stdout: '', stderr: parsedEither.left };
-  }
-  const parsed = parsedEither.right;
-  if (parsed.help) {
-    return { exitCode: 0, stdout: helpText, stderr: '' };
-  }
+const toRunCli =
+  (base: RunCliBase) =>
+  (opts: ValidatedCliNumbers): ParsedCli => ({
+    _tag: 'Run',
+    filePaths: base.filePaths,
+    options: {
+      tsconfigPath: base.tsconfigPath,
+      maxFlowSteps: opts.maxFlowSteps,
+      format: opts.format,
+      includeGraph: O.some(base.includeGraph),
+      minPatternOccurrences: O.some(opts.minPatternOccurrences),
+      minDirModules: O.some(opts.minDirModules),
+      excludePatterns: O.some(base.excludePatterns),
+    },
+  });
 
-  const result = analyzeFiles({ filePaths: parsed.filePaths, options: parsed.options });
-  if (E.isLeft(result)) {
-    return { exitCode: 2, stdout: '', stderr: result.left };
-  }
-
-  return {
-    exitCode: result.right.passed ? 0 : 1,
-    stdout: formatOutput(parsed.options.format, result.right),
-    stderr: '',
+const buildRunCli = (parsed: RawParsedArgs): E.Either<string, ParsedCli> => {
+  const values = parsed.values;
+  const format = parseFormat(asOptionalString(values.format));
+  const maxFlowSteps = parsePositiveInt({
+    flag: '--max-flow-steps',
+    raw: asOptionalString(values['max-flow-steps']),
+    defaultVal: 10,
+    minVal: 2,
+  });
+  const minPatternOccurrences = parsePositiveInt({
+    flag: '--min-pattern-occurrences',
+    raw: asOptionalString(values['min-pattern-occurrences']),
+    defaultVal: 3,
+    minVal: 2,
+  });
+  const minDirModules = parsePositiveInt({
+    flag: '--min-dir-modules',
+    raw: asOptionalString(values['min-dir-modules']),
+    defaultVal: 3,
+    minVal: 2,
+  });
+  const base: RunCliBase = {
+    filePaths: parsed.positionals,
+    tsconfigPath: asOptionalString(values.tsconfig),
+    includeGraph: values['include-graph'] === true,
+    excludePatterns: asStringArray(values.exclude),
   };
+
+  return E.map(toRunCli(base))(
+    Apply.sequenceS(E.Applicative)({
+      format,
+      maxFlowSteps,
+      minPatternOccurrences,
+      minDirModules,
+    }),
+  );
 };
+
+const validateAndBuildCli = (parsed: RawParsedArgs): E.Either<string, ParsedCli> =>
+  B.match(
+    () =>
+      B.match(
+        () => buildRunCli(parsed),
+        () => E.left<string, ParsedCli>('No input files provided. Run with --help for usage.'),
+      )(parsed.positionals.length === 0),
+    () => E.right<string, ParsedCli>({ _tag: 'Help' }),
+  )(parsed.values.help === true);
+
+const parseCliArgs = (argv: ReadonlyArray<string>): E.Either<string, ParsedCli> =>
+  E.chain(validateAndBuildCli)(parseRawArgs(argv));
+
+const formatOutput = ({ format, report }: FormatOutputInput) =>
+  match(format)
+    .with('md', () => formatMarkdownReports(report))
+    .with('json', () => formatJsonReports(report))
+    .exhaustive();
+
+const toCliError = (stderr: string) => ({
+  exitCode: 2,
+  stdout: '',
+  stderr,
+});
+
+const toCliReportResult =
+  (format: OutputFormat) =>
+  (report: ProjectAnalysisReport): CliResult => ({
+    exitCode: B.match(
+      () => 1,
+      () => 0,
+    )(report.passed),
+    stdout: formatOutput({ format, report }),
+    stderr: '',
+  });
+
+const executeHelpCli = constant({
+  exitCode: 0,
+  stdout: getHelpText(),
+  stderr: '',
+});
+
+const executeRunCli = ({
+  filePaths,
+  options,
+}: Extract<ParsedCli, { readonly _tag: 'Run' }>) =>
+  E.match(
+    toCliError,
+    toCliReportResult(options.format),
+  )(analyzeFiles({ filePaths, options }));
+
+const executeParsedCli = (parsed: ParsedCli) =>
+  match(parsed)
+    .with({ _tag: 'Help' }, executeHelpCli)
+    .with({ _tag: 'Run' }, executeRunCli)
+    .exhaustive();
+
+export const runCli = ((argv) =>
+  E.match(toCliError, executeParsedCli)(parseCliArgs(argv))) satisfies RunCli;
