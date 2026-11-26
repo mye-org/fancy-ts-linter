@@ -14,28 +14,32 @@ import { detectDddAndArityHints } from './dddDecompositionAndArityHint.js';
 
 export type HintRunner = (ctx: RuleContext) => ReadonlyArray<AgentHint>;
 
-const runners: ReadonlyArray<HintRunner> = [
-  detectAdtOverFlagsHints,
-  detectNewtypeBrandHints,
-  detectPatternMatchingDepthHints,
-  detectDddAndArityHints,
-  detectMonadLiftingHints,
-  detectOpticsHints,
-  detectDeclarativeCombinatorHints,
-  detectInferenceHygieneHints,
-];
+const priorityWeight = (p: HintPriority) => {
+  const weights: Record<HintPriority, number> = { high: 0, medium: 1, low: 2 };
+  return weights[p];
+};
 
-const priorityWeight = (p: HintPriority): number =>
-  p === 'high' ? 0 : p === 'medium' ? 1 : 2;
+const hintPriorityWeight = (h: AgentHint) => priorityWeight(h.priority);
 
-const byPriority: Ord.Ord<AgentHint> = Ord.contramap((h: AgentHint) => priorityWeight(h.priority))(
-  N.Ord,
-);
+const byPriority = Ord.contramap(hintPriorityWeight)(N.Ord);
 
-const executeDetectors = (ctx: RuleContext): ReadonlyArray<AgentHint> =>
-  RA.chain((r: HintRunner) => r(ctx))(runners);
+const applyRunner = (ctx: RuleContext) => (r: HintRunner) => r(ctx);
 
-const sortHints = RA.sort(byPriority);
+const executeDetectors = (ctx: RuleContext) => {
+  const runners: ReadonlyArray<HintRunner> = [
+    detectAdtOverFlagsHints,
+    detectNewtypeBrandHints,
+    detectPatternMatchingDepthHints,
+    detectDddAndArityHints,
+    detectMonadLiftingHints,
+    detectOpticsHints,
+    detectDeclarativeCombinatorHints,
+    detectInferenceHygieneHints,
+  ];
+  return RA.chain(applyRunner(ctx))(runners);
+};
+
+const sortHints = RA.sortBy([byPriority]);
 
 export const runAllHints = flow(
   executeDetectors,

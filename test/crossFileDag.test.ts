@@ -97,6 +97,10 @@ export const lowerText = ((s: string) => s.toLowerCase()) satisfies LowerText;
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -114,6 +118,10 @@ export const lowerText = ((s: string) => s.toLowerCase()) satisfies LowerText;
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
     expect(E.isRight(singleFileRes)).toBe(true);
@@ -169,6 +177,10 @@ export const runApp = ((cents: number) => priceCart(cents)) satisfies RunApp;
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -213,7 +225,10 @@ export const stepB = ((n: number) => (n > 0 ? stepA(n - 1) : 1)) satisfies StepB
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
-        includeGraph: true,
+        includeGraph: O.some(true),
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -221,7 +236,10 @@ export const stepB = ((n: number) => (n > 0 ? stepA(n - 1) : 1)) satisfies StepB
     if (E.isLeft(res)) return;
 
     expect(res.right.projectGraphSummary.cycleCount).toBe(1);
-    expect(res.right.projectGraph?.cycles.length).toBe(1);
+    expect(O.isSome(res.right.projectGraph)).toBe(true);
+    if (O.isSome(res.right.projectGraph)) {
+      expect(res.right.projectGraph.value.cycles.length).toBe(1);
+    }
     const cycleHints = res.right.crossFileHints.filter((h) => h.category === 'dependency-cycle');
     expect(cycleHints.length).toBe(1);
     expect(cycleHints[0]?.priority).toBe('high');

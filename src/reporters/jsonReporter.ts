@@ -1,4 +1,6 @@
+import { constant } from 'fp-ts/lib/function.js';
 import * as O from 'fp-ts/lib/Option.js';
+import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import type {
   CrossFileHint,
   ProjectAnalysisReport,
@@ -9,6 +11,16 @@ import type { AgentHint, AnalysisReport, TypeFlowNode } from '../model/report.js
 
 export type FormatProjectReport = (report: ProjectAnalysisReport) => string;
 
+const emptyRecord = constant({});
+const emptyString = constant('');
+const orEmptyString = O.getOrElse(emptyString);
+
+const toSuggestedSignatureField = (suggestedSignature: string) => ({ suggestedSignature });
+const optionalSuggestedSignature = O.match(emptyRecord, toSuggestedSignatureField);
+
+const toStepCountField = (stepCount: number) => ({ stepCount });
+const optionalStepCount = O.match(emptyRecord, toStepCountField);
+
 const serializeHint = (h: AgentHint) => ({
   hintId: h.hintId,
   category: h.category,
@@ -16,7 +28,7 @@ const serializeHint = (h: AgentHint) => ({
   location: h.location,
   evidence: h.evidence,
   suggestion: h.suggestion,
-  ...(O.isSome(h.suggestedSignature) ? { suggestedSignature: h.suggestedSignature.value } : {}),
+  ...optionalSuggestedSignature(h.suggestedSignature),
   researchQuestions: h.researchQuestions,
 });
 
@@ -28,7 +40,7 @@ const serializeCrossFileHint = (h: CrossFileHint) => ({
   symbols: h.symbols,
   evidence: h.evidence,
   suggestion: h.suggestion,
-  ...(O.isSome(h.suggestedSignature) ? { suggestedSignature: h.suggestedSignature.value } : {}),
+  ...optionalSuggestedSignature(h.suggestedSignature),
   researchQuestions: h.researchQuestions,
 });
 
@@ -37,7 +49,7 @@ const serializeNode = (n: TypeFlowNode) => ({
   kind: n.kind,
   signature: n.signature,
   effects: n.effects,
-  ...(O.isSome(n.stepCount) ? { stepCount: n.stepCount.value } : {}),
+  ...optionalStepCount(n.stepCount),
 });
 
 const serializeFileReport = (r: AnalysisReport) => ({
@@ -46,13 +58,13 @@ const serializeFileReport = (r: AnalysisReport) => ({
   summary: {
     errorCount: r.summary.errorCount,
     hintCount: r.summary.hintCount,
-    exportedFunction: O.getOrElse(() => '')(r.summary.exportedFunction),
-    exportedSignature: O.getOrElse(() => '')(r.summary.exportedSignature),
+    exportedFunction: orEmptyString(r.summary.exportedFunction),
+    exportedSignature: orEmptyString(r.summary.exportedSignature),
   },
   errors: r.errors,
-  hints: r.hints.map(serializeHint),
+  hints: RA.map(serializeHint)(r.hints),
   typeFlowGraph: {
-    nodes: r.typeFlowGraph.nodes.map(serializeNode),
+    nodes: RA.map(serializeNode)(r.typeFlowGraph.nodes),
     edges: r.typeFlowGraph.edges,
   },
 });
@@ -65,8 +77,8 @@ const serializeProjectNode = (n: ProjectModuleNode) => ({
   isBarrel: n.isBarrel,
   isTypeOnlyModule: n.isTypeOnlyModule,
   isEntrypoint: n.isEntrypoint,
-  exportedFunction: O.getOrElse(() => '')(n.exportedFunction),
-  exportedSignature: O.getOrElse(() => '')(n.exportedSignature),
+  exportedFunction: orEmptyString(n.exportedFunction),
+  exportedSignature: orEmptyString(n.exportedSignature),
   effects: n.effects,
   inDegree: n.inDegree,
   outDegree: n.outDegree,
@@ -79,24 +91,26 @@ const serializeProjectNode = (n: ProjectModuleNode) => ({
 
 const serializeProjectGraph = (g: ProjectDagGraph) => ({
   rootDir: g.rootDir,
-  nodes: g.nodes.map(serializeProjectNode),
+  nodes: RA.map(serializeProjectNode)(g.nodes),
   edges: g.edges,
   cycles: g.cycles,
   directories: g.directories,
 });
 
-export const formatJsonReports: FormatProjectReport = (report) =>
-  JSON.stringify(
-    {
-      passed: report.passed,
-      summary: report.summary,
-      files: report.files.map(serializeFileReport),
-      projectGraphSummary: report.projectGraphSummary,
-      ...(report.projectGraph !== undefined
-        ? { projectGraph: serializeProjectGraph(report.projectGraph) }
-        : {}),
-      crossFileHints: report.crossFileHints.map(serializeCrossFileHint),
-    },
-    null,
-    2,
-  );
+const toProjectGraphField = (g: ProjectDagGraph) => ({
+  projectGraph: serializeProjectGraph(g),
+});
+
+const optionalProjectGraph = O.match(emptyRecord, toProjectGraphField);
+
+const buildSerializableReport = (report: ProjectAnalysisReport) => ({
+  passed: report.passed,
+  summary: report.summary,
+  files: RA.map(serializeFileReport)(report.files),
+  projectGraphSummary: report.projectGraphSummary,
+  ...optionalProjectGraph(report.projectGraph),
+  crossFileHints: RA.map(serializeCrossFileHint)(report.crossFileHints),
+});
+
+export const formatJsonReports = ((report) =>
+  JSON.stringify(buildSerializableReport(report), null, 2)) satisfies FormatProjectReport;

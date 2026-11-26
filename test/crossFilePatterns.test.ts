@@ -79,6 +79,10 @@ export const calcRefund = ((r: RefundAmount) => r.amountCents) satisfies CalcRef
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -137,6 +141,10 @@ export const parseC = flow(E.fromPredicate(isAdult, err), E.chain(checkCap), E.m
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -193,6 +201,10 @@ export const mergeInvoice = ((a: Invoice) => (b: Invoice) => ({ invoiceId: a.inv
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -243,6 +255,10 @@ export const handleAccount = ((env: AppEnv) => (id: string) => loadAccount(env)(
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 
@@ -303,6 +319,10 @@ export const calcRate = ((code: string) => (fetchFx(code) ? code : code)) satisf
         tsconfigPath: O.some(path.join(projDir, 'tsconfig.json')),
         maxFlowSteps: 10,
         format: 'json',
+        includeGraph: O.none,
+        minPatternOccurrences: O.none,
+        minDirModules: O.none,
+        excludePatterns: O.none,
       },
     });
 

@@ -1,4 +1,5 @@
 import { flow } from 'fp-ts/lib/function.js';
+import * as O from 'fp-ts/lib/Option.js';
 import * as RA from 'fp-ts/lib/ReadonlyArray.js';
 import * as S from 'fp-ts/lib/string.js';
 import * as ts from 'typescript';
@@ -6,10 +7,18 @@ import type { DiagnosticError, RuleContext } from '../model/report.js';
 
 export type RuleRunner = (ctx: RuleContext) => ReadonlyArray<DiagnosticError>;
 
-const collectAllNodes = (sf: ts.SourceFile) => (node: ts.Node): ReadonlyArray<ts.Node> => [
-  node,
-  ...RA.chain(collectAllNodes(sf))(node.getChildren(sf)),
-];
+const expandHeadNode =
+  ({ sf, queue }: { readonly sf: ts.SourceFile; readonly queue: ReadonlyArray<ts.Node> }) =>
+  (head: ts.Node): readonly [ts.Node, ReadonlyArray<ts.Node>] => [
+    head,
+    [...head.getChildren(sf), ...RA.dropLeft(1)(queue)],
+  ];
+
+const stepNodeQueue = (sf: ts.SourceFile) => (queue: ReadonlyArray<ts.Node>) =>
+  O.map(expandHeadNode({ sf, queue }))(RA.head(queue));
+
+const collectAllNodes = (sf: ts.SourceFile) =>
+  RA.unfold(RA.of<ts.Node>(sf), stepNodeQueue(sf));
 
 type PurityErrorInput = {
   readonly ruleId: string;
@@ -29,72 +38,58 @@ const makePurityError =
     fixGuidance,
   });
 
-const isConstVarStmt = (stmt: ts.Statement): boolean =>
-  ts.isVariableStatement(stmt) &&
-  (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0 &&
-  RA.every((d: ts.VariableDeclaration) => d.initializer !== undefined)(
-    stmt.declarationList.declarations,
-  );
+const hasConstFlag = (flags: ts.NodeFlags) => (flags & ts.NodeFlags.Const) !== 0;
 
-const isNonEmptyReturnStmt = (stmt: ts.Statement): boolean =>
+const hasInitializer = (d: ts.VariableDeclaration) => d.initializer !== undefined;
+
+const isConstVarStmt = (stmt: ts.Statement) =>
+  ts.isVariableStatement(stmt) &&
+  hasConstFlag(stmt.declarationList.flags) &&
+  RA.every(hasInitializer)(stmt.declarationList.declarations);
+
+const isNonEmptyReturnStmt = (stmt: ts.Statement) =>
   ts.isReturnStatement(stmt) && stmt.expression !== undefined;
 
-const isPureConstBindingBlock = (block: ts.Block): boolean => {
-  if (block.statements.length === 0) {
-    return false;
-  }
-  const initStmts = block.statements.slice(0, -1);
-  const lastStmt = block.statements[block.statements.length - 1];
-  return (
-    lastStmt !== undefined &&
-    RA.every(isConstVarStmt)(initStmts) &&
-    isNonEmptyReturnStmt(lastStmt)
-  );
-};
+const isPureConstBindingBlock = (block: ts.Block) =>
+  O.exists(RA.every(isConstVarStmt))(RA.init(block.statements)) &&
+  O.exists(isNonEmptyReturnStmt)(RA.last(block.statements));
 
-const checkNoBlockBody =
-  (ctx: RuleContext) =>
-  (nodes: ReadonlyArray<ts.Node>): ReadonlyArray<DiagnosticError> =>
-    flow(
-      RA.filter(
-        (n: ts.Node): n is ts.ArrowFunction | ts.FunctionExpression =>
-          (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
-          ts.isBlock(n.body) &&
-          !isPureConstBindingBlock(n.body),
-      ),
-      RA.map((n: ts.ArrowFunction | ts.FunctionExpression) =>
-        makePurityError(ctx)({
-          ruleId: 'no-block-body',
-          node: n,
-          message:
-            'Imperative function block body `{ ... }` is forbidden; only expression bodies or pure `const`-binding blocks ending in a single `return <expr>;` are allowed.',
-          fixGuidance:
-            'Convert the block body to a single expression, a pure `const ...; return <expr>;` block, or decompose steps into a `flow(...)`.',
-        }),
-      ),
-    )(nodes);
+const isDisallowedBlockBodyFn = (n: ts.Node) =>
+  (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
+  ts.isBlock(n.body) &&
+  !isPureConstBindingBlock(n.body);
 
-const assignmentKinds: ReadonlyArray<ts.SyntaxKind> = [
-  ts.SyntaxKind.EqualsToken,
-  ts.SyntaxKind.PlusEqualsToken,
-  ts.SyntaxKind.MinusEqualsToken,
-  ts.SyntaxKind.AsteriskEqualsToken,
-  ts.SyntaxKind.SlashEqualsToken,
-  ts.SyntaxKind.PercentEqualsToken,
-];
+const toNoBlockBodyError = (ctx: RuleContext) => (n: ts.Node) =>
+    makePurityError(ctx)({
+      ruleId: 'no-block-body',
+      node: n,
+      message:
+        'Imperative function block body `{ ... }` is forbidden; only expression bodies or pure `const`-binding blocks ending in a single `return <expr>;` are allowed.',
+      fixGuidance:
+        'Convert the block body to a single expression, a pure `const ...; return <expr>;` block, or decompose steps into a `flow(...)`.',
+    });
 
-const isAssignmentBinary = (n: ts.Node): boolean =>
+const checkNoBlockBody = (ctx: RuleContext) =>
+  flow(RA.filter(isDisallowedBlockBodyFn), RA.map(toNoBlockBodyError(ctx)));
+
+const isAssignmentBinary = (n: ts.Node) =>
   ts.isBinaryExpression(n) &&
-  assignmentKinds.includes(n.operatorToken.kind);
+  [
+    ts.SyntaxKind.EqualsToken,
+    ts.SyntaxKind.PlusEqualsToken,
+    ts.SyntaxKind.MinusEqualsToken,
+    ts.SyntaxKind.AsteriskEqualsToken,
+    ts.SyntaxKind.SlashEqualsToken,
+    ts.SyntaxKind.PercentEqualsToken,
+  ].includes(n.operatorToken.kind);
 
-const isMutatingUnary = (n: ts.Node): boolean =>
+const isMutatingUnary = (n: ts.Node) =>
   (ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
   (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken);
 
-const isAsyncKeyword = (n: ts.Node): boolean =>
-  n.kind === ts.SyntaxKind.AsyncKeyword;
+const isAsyncKeyword = (n: ts.Node) => n.kind === ts.SyntaxKind.AsyncKeyword;
 
-const isImperativeNode = (n: ts.Node): boolean =>
+const isImperativeNode = (n: ts.Node) =>
   ts.isIfStatement(n) ||
   ts.isSwitchStatement(n) ||
   ts.isForStatement(n) ||
@@ -108,61 +103,51 @@ const isImperativeNode = (n: ts.Node): boolean =>
   isAsyncKeyword(n) ||
   isAssignmentBinary(n) ||
   isMutatingUnary(n) ||
-  (ts.isVariableDeclarationList(n) && (n.flags & ts.NodeFlags.Const) === 0);
+  (ts.isVariableDeclarationList(n) && !hasConstFlag(n.flags));
 
-const checkNoImperativeConstructs =
-  (ctx: RuleContext) =>
-  (nodes: ReadonlyArray<ts.Node>): ReadonlyArray<DiagnosticError> =>
-    flow(
-      RA.filter(isImperativeNode),
-      RA.map((n: ts.Node) =>
-        makePurityError(ctx)({
-          ruleId: 'no-imperative-constructs',
-          node: n,
-          message: `Imperative construct (${ts.SyntaxKind[n.kind]}) is forbidden in declarative functional style.`,
-          fixGuidance:
-            'Replace `if`/`switch` with `ts-pattern`/`B.match`, `for` with `RA.*` combinators, `try/throw` with `Either`/`TaskEither`, and `async/await` with `Task`/`TaskEither`.',
-        }),
-      ),
-    )(nodes);
+const toNoImperativeError = (ctx: RuleContext) => (n: ts.Node) =>
+  makePurityError(ctx)({
+    ruleId: 'no-imperative-constructs',
+    node: n,
+    message: `Imperative construct (${ts.SyntaxKind[n.kind]}) is forbidden in declarative functional style.`,
+    fixGuidance:
+      'Replace `if`/`switch` with `ts-pattern`/`B.match`, `for` with `RA.*` combinators, `try/throw` with `Either`/`TaskEither`, and `async/await` with `Task`/`TaskEither`.',
+  });
 
-const mutatingMethodNames: ReadonlyArray<string> = [
-  'push',
-  'pop',
-  'shift',
-  'unshift',
-  'splice',
-  'sort',
-  'reverse',
-  'forEach',
-];
+const checkNoImperativeConstructs = (ctx: RuleContext) =>
+  flow(RA.filter(isImperativeNode), RA.map(toNoImperativeError(ctx)));
 
-const isMutatingMethodCall = (n: ts.Node): n is ts.CallExpression =>
+const isMutatingMethodCall = (n: ts.Node) =>
   ts.isCallExpression(n) &&
   ts.isPropertyAccessExpression(n.expression) &&
-  (RA.elem(S.Eq)(n.expression.name.text)(mutatingMethodNames) ||
+  (RA.elem(S.Eq)(n.expression.name.text)([
+    'push',
+    'pop',
+    'shift',
+    'unshift',
+    'splice',
+    'sort',
+    'reverse',
+    'forEach',
+  ]) ||
     (ts.isIdentifier(n.expression.expression) &&
       n.expression.expression.text === 'Object' &&
       n.expression.name.text === 'assign'));
 
-const checkNoMutatingMethods =
-  (ctx: RuleContext) =>
-  (nodes: ReadonlyArray<ts.Node>): ReadonlyArray<DiagnosticError> =>
-    flow(
-      RA.filter(isMutatingMethodCall),
-      RA.map((n: ts.CallExpression) =>
-        makePurityError(ctx)({
-          ruleId: 'no-mutating-methods',
-          node: n,
-          message: 'Mutating or imperative method call is forbidden.',
-          fixGuidance:
-            'Use immutable `fp-ts/ReadonlyArray` (`RA.append`, `RA.sort`, `RA.reverse`, `RA.map`) or `monocle-ts` Optics.',
-        }),
-      ),
-    )(nodes);
+const toNoMutatingMethodError = (ctx: RuleContext) => (n: ts.Node) =>
+  makePurityError(ctx)({
+    ruleId: 'no-mutating-methods',
+    node: n,
+    message: 'Mutating or imperative method call is forbidden.',
+    fixGuidance:
+      'Use immutable `fp-ts/ReadonlyArray` (`RA.append`, `RA.sort`, `RA.reverse`, `RA.map`) or `monocle-ts` Optics.',
+  });
+
+const checkNoMutatingMethods = (ctx: RuleContext) =>
+  flow(RA.filter(isMutatingMethodCall), RA.map(toNoMutatingMethodError(ctx)));
 
 export const checkDeclarativePurityRules = ((ctx: RuleContext): ReadonlyArray<DiagnosticError> => {
-  const nodes = collectAllNodes(ctx.sourceFile)(ctx.sourceFile);
+  const nodes = collectAllNodes(ctx.sourceFile);
   return [
     ...checkNoBlockBody(ctx)(nodes),
     ...checkNoImperativeConstructs(ctx)(nodes),

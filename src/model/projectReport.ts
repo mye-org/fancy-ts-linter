@@ -101,7 +101,7 @@ export type ProjectAnalysisReport = {
   readonly summary: ProjectAnalysisSummary;
   readonly files: ReadonlyArray<AnalysisReport>;
   readonly projectGraphSummary: ProjectDagSummary;
-  readonly projectGraph?: ProjectDagGraph;
+  readonly projectGraph: O.Option<ProjectDagGraph>;
   readonly crossFileHints: ReadonlyArray<CrossFileHint>;
 };
 
@@ -152,3 +152,25 @@ export type ResolvedAnalyzeOptions = {
   readonly minDirModules: number;
   readonly excludePatterns: ReadonlyArray<string>;
 };
+
+export type BuildProjectAnalysisReportInput = {
+  readonly passed: boolean;
+  readonly summary: ProjectAnalysisSummary;
+  readonly files: ReadonlyArray<AnalysisReport>;
+  readonly projectGraphSummary: ProjectDagSummary;
+  readonly projectGraph: O.Option<ProjectDagGraph>;
+  readonly crossFileHints: ReadonlyArray<CrossFileHint>;
+};
+
+export type BuildProjectAnalysisReport = (
+  input: BuildProjectAnalysisReportInput,
+) => ProjectAnalysisReport;
+
+export const buildProjectAnalysisReport = ((input: BuildProjectAnalysisReportInput) => ({
+  passed: input.passed,
+  summary: input.summary,
+  files: input.files,
+  projectGraphSummary: input.projectGraphSummary,
+  projectGraph: input.projectGraph,
+  crossFileHints: input.crossFileHints,
+})) satisfies BuildProjectAnalysisReport;
